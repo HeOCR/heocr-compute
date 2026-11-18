@@ -37,10 +37,35 @@ from .ssh import Remote, SSHError, public_key
 
 POD_PREFIX = "heocr-"
 POD_IN, POD_OUT, POD_EXIT = "/heocr/in", "/heocr/out", "/heocr/exit_code"
+POD_DEADMAN = "/heocr/deadman.sh"
 READY_TIMEOUT = 20 * 60          # provisioning + image pull
 DEADMAN_GRACE = 15 * 60          # the pod removes itself this long after the wall-time limit
 PULL_RESERVE = 10 * 60           # wall time kept back for pulling results
 LOCAL_FREE_MARGIN = 1 << 30      # keep 1 GB free on this machine after a pull
+
+# The pod-side dead-man's switch. ``deadman.sh SECONDS`` arms it in the background; ``deadman.sh now``
+# fires it at once (the smoke run's proof). An SSH session does not inherit the container's environment,
+# so RunPod's pod id and pod-scoped key are read from PID 1's. It prints what is missing, never values.
+DEADMAN_SH = r"""#!/bin/sh
+for v in RUNPOD_POD_ID RUNPOD_API_KEY; do
+  eval "cur=\${$v:-}"
+  if [ -z "$cur" ] && [ -r /proc/1/environ ]; then
+    val=$(tr '\000' '\n' < /proc/1/environ | sed -n "s/^$v=//p" | head -n 1)
+    [ -n "$val" ] && export "$v=$val"
+  fi
+done
+log="${HEOCR_DEADMAN_LOG:-/heocr/deadman.log}"
+missing=""
+[ -n "${RUNPOD_POD_ID:-}" ] || missing="$missing pod-id"
+[ -n "${RUNPOD_API_KEY:-}" ] || missing="$missing pod-key"
+command -v runpodctl >/dev/null 2>&1 || missing="$missing runpodctl"
+if [ -n "$missing" ]; then echo "unavailable:$missing"; exit 0; fi
+remove='runpodctl pod delete "$RUNPOD_POD_ID" || runpodctl remove pod "$RUNPOD_POD_ID"'
+if [ "$1" = now ]; then sh -c "$remove" >"$log" 2>&1; echo fired; exit 0; fi
+detach=""; command -v setsid >/dev/null 2>&1 && detach=setsid
+nohup $detach sh -c "sleep $1; $remove" >"$log" 2>&1 </dev/null &
+echo armed
+"""
 
 # What may come back: checkpoints, logs and scores.
 RESULT_SUFFIXES = (".checkpoint", "_checkpoint", ".traineddata", ".lstm", ".pt", ".pth", ".ckpt",
@@ -76,6 +101,7 @@ class Spec:
     dry_run: bool = False
     yes: bool = False
     policy: object = None     # policy.Policy; loaded from the local files when None
+    prove_deadman: bool = False  # smoke only: fire the pod's switch at the end and check the pod is gone
 
 
 def new_run_id(now: dt.datetime) -> str:
@@ -140,10 +166,10 @@ def sweep(api, ledger: Ledger, *, everything: bool = False, dry_run: bool = Fals
     host = socket.gethostname()
     runs = ledger.runs()
     killed = []
-    for pod in api.list_pods():
+    ours = [p for p in api.list_pods() if (p.get("name") or "").startswith(POD_PREFIX)]
+    out(f"sweep: {len(ours)} heocr pods on the account")
+    for pod in ours:
         name = pod.get("name") or ""
-        if not name.startswith(POD_PREFIX):
-            continue
         rid = run_id_of(name)
         r = runs.get(rid) if rid else None
         res = (r or {}).get("reserve") or {}
@@ -235,6 +261,7 @@ class Runner:
 
     def _execute(self, spec, entries, run_id, name, q) -> dict:
         pod_id, rate, t_created, status, error, pulled = None, q.usd_per_hour, None, "error", None, []
+        deadman = proof = None
         handlers = self._trap()
         caffeinate = self._keep_awake()
         t0 = self.clock()
@@ -250,10 +277,12 @@ class Runner:
                 raise RunFailed(f"pod billed ${billed_rate:.4f}/h, over the quote ${q.compute_usd_per_hour:.4f}/h")
             remote = self._wait_ready(pod_id)
             deadline = t0 + spec.hours * 3600
-            self._arm_deadman(remote, deadline)
+            deadman = self._arm_deadman(remote, deadline)
             self._upload(remote, spec, entries)
             status = self._run_job(remote, spec, deadline)
             pulled = self._pull(remote, spec, run_id)
+            if spec.prove_deadman and deadman == "armed":
+                proof = self._prove_self_removal(remote, pod_id)
             if status == "ok":
                 self.out(f"done: {len(pulled)} files in {self._results_dir(spec, run_id)}")
         except Interrupted:
@@ -275,11 +304,13 @@ class Runner:
             if pod_id is None or gone:
                 usd = budget.billed(rate, secs) if pod_id else 0.0
                 self.ledger.final(run_id, pod_type=spec.profile.pod_type, hours=secs / 3600, usd=usd,
-                                  status=status, pod_id=pod_id, error=error, pulled=len(pulled))
+                                  status=status, pod_id=pod_id, error=error, pulled=len(pulled),
+                                  deadman=deadman, self_removal=proof)
             self._untrap(handlers)
             if caffeinate:
                 caffeinate.terminate()
-        return {"run_id": run_id, "pod_id": pod_id, "status": status, "error": error, "pulled": pulled}
+        return {"run_id": run_id, "pod_id": pod_id, "status": status, "error": error, "pulled": pulled,
+                "deadman": deadman, "self_removal": proof}
 
     def _find_by_name(self, name: str) -> str | None:
         try:
@@ -310,15 +341,30 @@ class Runner:
             self.sleep(10)
         raise RunFailed(f"pod {pod_id} not reachable over SSH within {READY_TIMEOUT // 60} min")
 
-    def _arm_deadman(self, remote, deadline: float) -> None:
+    def _arm_deadman(self, remote, deadline: float) -> str:
         secs = int(max(60, deadline - self.clock()) + DEADMAN_GRACE)
-        cmd = ('if [ -n "$RUNPOD_POD_ID" ] && [ -n "$RUNPOD_API_KEY" ] && command -v runpodctl >/dev/null; then '
-               f'nohup setsid sh -c "sleep {secs}; runpodctl remove pod \\"\\$RUNPOD_POD_ID\\"" '
-               '>/dev/null 2>&1 < /dev/null & echo armed; else echo unavailable; fi')
-        r = remote.run(cmd, timeout=60, check=False)
-        state = (r.stdout or "").strip() or "unavailable"
+        remote.run(f"mkdir -p /heocr && cat > {POD_DEADMAN}", input=DEADMAN_SH, timeout=60)
+        r = remote.run(f"sh {POD_DEADMAN} {secs}", timeout=60, check=False)
+        state = (r.stdout or "").strip().splitlines()[-1:] or ["unavailable: no answer"]
+        state = state[0]
         self.out(f"dead-man's switch: {state} ({secs // 60} min)" +
                  ("" if state == "armed" else "; the sweeper is the only backstop"))
+        return state
+
+    def _prove_self_removal(self, remote, pod_id: str) -> str:
+        """Smoke runs only: fire the switch now, and check through the API that the pod is gone."""
+        try:
+            remote.run(f"sh {POD_DEADMAN} now", timeout=120, check=False)
+        except SSHError:
+            pass  # the connection may drop as the pod goes
+        for _ in range(12):
+            self.sleep(10)
+            pod = self.api.get_pod(pod_id)
+            if pod is None or pod.get("status") == "TERMINATED":
+                self.out("self-removal: works (the pod removed itself)")
+                return "works"
+        self.out("self-removal: FAILED (the pod is still there; the runner terminates it)")
+        return "failed"
 
     def _upload(self, remote, spec, entries) -> None:
         remote.upload(spec.root, [e.path for e in entries], POD_IN)

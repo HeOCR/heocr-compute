@@ -77,6 +77,8 @@ class FakeRemote:
         self.uploaded = None
         self.corrupt = set(corrupt_once)
         self.commands = []
+        self.deadman = "armed\n"
+        self.on_fire = None
 
     def run(self, command, input=None, timeout=600, check=True):
         self.commands.append(command)
@@ -84,8 +86,12 @@ class FakeRemote:
             exc = self.fail_on_exc if hasattr(self, "fail_on_exc") else SSHError("boom")
             raise exc
         ok = SimpleNamespace(returncode=0, stdout="", stderr="")
-        if "runpodctl" in command:
-            ok.stdout = "armed\n"
+        if command.startswith("sh /heocr/deadman.sh now"):
+            ok.stdout = "fired\n"
+            if self.on_fire:
+                self.on_fire()
+        elif command.startswith("sh /heocr/deadman.sh"):
+            ok.stdout = self.deadman
         elif command.startswith("cat /heocr/exit_code"):
             ok.stdout = self.exit_code
         elif "find . -type f" in command:
@@ -181,6 +187,37 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(f["pod_type"], "cpu3cx2")
         self.assertGreater(f["usd"], 0)
         self.assertEqual(self.ledger.month_to_date()["open_estimate"], 0)
+
+    def test_deadman_armed_and_reported(self):
+        remote = FakeRemote(dict(OUT))
+        res = self.make(remote).run(self.spec())
+        self.assertEqual(res["deadman"], "armed")
+        self.assertIsNone(res["self_removal"])
+        self.assertTrue(any("cat > /heocr/deadman.sh" in c for c in remote.commands))
+        self.assertEqual(self.final()[0]["deadman"], "armed")
+
+    def test_deadman_unavailable_is_reported(self):
+        remote = FakeRemote(dict(OUT))
+        remote.deadman = "unavailable: pod-key\n"
+        res = self.make(remote).run(self.spec(prove_deadman=True))
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["deadman"], "unavailable: pod-key")
+        self.assertIsNone(res["self_removal"])      # nothing to prove
+        self.assertEqual(self.api.terminated, [res["pod_id"]])
+
+    def test_smoke_proves_self_removal(self):
+        remote = FakeRemote(dict(OUT))
+        remote.on_fire = lambda: self.api.pods.clear()
+        res = self.make(remote).run(self.spec(prove_deadman=True))
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["self_removal"], "works")
+
+    def test_failed_self_removal_still_terminates(self):
+        remote = FakeRemote(dict(OUT))
+        res = self.make(remote).run(self.spec(prove_deadman=True))
+        self.assertEqual(res["self_removal"], "failed")
+        self.assertEqual(self.api.terminated, [res["pod_id"]])
+        self.assertEqual(self.api.pods, {})
 
     def test_corrupted_transfer_is_fetched_again(self):
         remote = FakeRemote(dict(OUT), corrupt_once={"heb.traineddata"})

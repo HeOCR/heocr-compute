@@ -82,6 +82,9 @@ def _spec(a, p: profiles.Profile, manifest_path, root, cmd, run_cap) -> Spec:
 
 def _report(res) -> int:
     print(f"run {res['run_id']}: {res['status']}" + (f" ({res['error']})" if res.get("error") else ""))
+    if res.get("deadman"):
+        print(f"dead-man's switch: {res['deadman']}" +
+              (f", self-removal: {res['self_removal']}" if res.get("self_removal") else ""))
     return 0 if res["status"] in ("ok", "dry_run", "declined") else 1
 
 
@@ -102,6 +105,7 @@ def cmd_smoke(a):
     spec = _spec(a, profiles.PROFILES["smoke"], work / "inputs.json", work, "bash in/smoke.sh",
                  min(a.run_cap, SMOKE_CAP_USD))
     spec.policy = policy
+    spec.prove_deadman = True
     try:
         return _report(Runner(_api(), Ledger()).run(spec))
     finally:
@@ -127,9 +131,10 @@ def cmd_policy(a):
 def cmd_spend(a):
     led = Ledger()
     m = led.month_to_date(a.month)
-    print(f"{m['month']}: ${m['spent']:.2f} spent in {len(m['finals'])} runs"
-          f" + ${m['open_estimate']:.2f} reserved by {len(m['open'])} open runs"
-          f" = ${m['total']:.2f} of ${budget.MONTH_CAP_USD:.2f}")
+    usd = lambda x: f"${x:.2f}" if x == 0 or x >= 1 else f"${x:.4f}"
+    print(f"{m['month']}: {usd(m['spent'])} spent in {len(m['finals'])} runs"
+          f" + {usd(m['open_estimate'])} reserved by {len(m['open'])} open runs"
+          f" = {usd(m['total'])} of ${budget.MONTH_CAP_USD:.2f} this month")
     for r in m["finals"]:
         f = r["final"]
         print(f"  {f['date']}  {f['pod_type']:40} {f['hours']:7.3f} h  ${f['usd']:7.4f}  {f['status']}")
