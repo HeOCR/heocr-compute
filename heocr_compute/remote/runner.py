@@ -282,6 +282,7 @@ class Runner:
             remote = self._wait_ready(pod_id)
             deadline = t0 + spec.hours * 3600
             deadman = self._arm_deadman(remote, deadline)
+            self._record_pod(remote, run_id, pod_id, spec.profile.pod_type, billed_rate)
             self._upload(remote, spec, entries)
             status = self._run_job(remote, spec, deadline)
             pulled = self._pull(remote, spec, run_id)
@@ -375,6 +376,14 @@ class Runner:
         self.out(f"dead-man's switch: {state} ({secs // 60} min)" +
                  ("" if state == "armed" else "; the sweeper is the only backstop"))
         return state
+
+    def _record_pod(self, remote, run_id: str, pod_id: str, pod_type: str, usd_per_hr: float) -> None:
+        """out/pod.json: which machine the job ran on. It comes back with the results, next to the job's own
+        records, so a model's provenance names its hardware."""
+        info = {"run_id": run_id, "pod_id": pod_id, "pod_type": pod_type, "usd_per_hr": usd_per_hr,
+                "provider": "runpod"}
+        remote.run(f"mkdir -p {POD_OUT} && cat > {POD_OUT}/pod.json", input=json.dumps(info, indent=1) + "\n",
+                   timeout=60)
 
     def _prove_self_removal(self, remote, pod_id: str) -> str:
         """Smoke runs only: fire the switch now, and check through the API that the pod is gone."""

@@ -82,6 +82,8 @@ class FakeRemote:
 
     def run(self, command, input=None, timeout=600, check=True):
         self.commands.append(command)
+        if "pod.json" in command:
+            self.pod_json = json.loads(input)
         if self.fail_on and self.fail_on in command:
             exc = self.fail_on_exc if hasattr(self, "fail_on_exc") else SSHError("boom")
             raise exc
@@ -182,7 +184,10 @@ class RunnerTest(unittest.TestCase):
             self.assertEqual(manifest.sha256_file(dest / rel), digest)
         self.assertEqual(sorted(remote.uploaded), ["job.sh", "lines.txt"])
         self.assertTrue(any("sha256sum -c" in c for c in remote.commands))
+        self.assertTrue(any("cat > /heocr/out/pod.json" in c for c in remote.commands))
         self.assertEqual(self.api.terminated, [res["pod_id"]])
+        self.assertEqual(remote.pod_json["pod_type"], "cpu3cx2")
+        self.assertEqual(remote.pod_json["pod_id"], res["pod_id"])
         body = self.api.created[0]
         self.assertTrue(body["name"].startswith("heocr-smoke-"))
         self.assertEqual(body["cpu"], {"id": "cpu3c", "vcpuCount": 2})
