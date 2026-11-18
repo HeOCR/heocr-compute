@@ -105,9 +105,10 @@ class RunPod:
                 continue
             detail = ""
             try:
-                detail = json.loads(raw).get("message", "") or json.loads(raw).get("error", "")
-            except (ValueError, AttributeError):
-                pass
+                body_json = json.loads(raw)
+                detail = body_json.get("message") or body_json.get("error") or json.dumps(body_json)[:300]
+            except (ValueError, AttributeError, TypeError):
+                detail = (raw or b"").decode("utf-8", "replace").strip()[:300]
             raise RunPodError(f"{method} {path}: HTTP {status} {detail}".strip(), status)
         raise last or RunPodError(f"{method} {path}: failed")
 
