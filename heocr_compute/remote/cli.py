@@ -45,6 +45,8 @@ def _connect():
 
 def _profile(a) -> profiles.Profile:
     p = profiles.PROFILES[a.profile]
+    if getattr(a, "cpu_flavor", None) or getattr(a, "vcpus", None):
+        p = p.sized(a.cpu_flavor, a.vcpus)
     return p.community() if getattr(a, "community", False) else p
 
 
@@ -172,6 +174,8 @@ def main(argv=None) -> int:
     q = sub.add_parser("quote", help="live price, worst case and the caps' verdict; spends nothing")
     q.add_argument("--profile", choices=sorted(profiles.PROFILES), required=True)
     q.add_argument("--community", action="store_true", help="GPU only: the community cloud")
+    q.add_argument("--cpu-flavor", help="CPU only: another flavour (cpu3c, cpu3g, cpu5c, ...), e.g. when the default has no capacity")
+    q.add_argument("--vcpus", type=int, help="CPU only: another vCPU count, a power of two")
     money(q)
     q.set_defaults(fn=cmd_quote)
 
@@ -192,6 +196,8 @@ def main(argv=None) -> int:
     r = sub.add_parser("run", help="one run on a pod")
     r.add_argument("--profile", choices=["cpu", "gpu"], required=True)
     r.add_argument("--community", action="store_true", help="GPU only: the community cloud")
+    r.add_argument("--cpu-flavor", help="CPU only: another flavour (cpu3c, cpu3g, cpu5c, ...), e.g. when the default has no capacity")
+    r.add_argument("--vcpus", type=int, help="CPU only: another vCPU count, a power of two")
     r.add_argument("--manifest", required=True)
     r.add_argument("--root", help="folder the manifest's paths are relative to (default: the manifest's)")
     r.add_argument("--cmd", required=True, help="run on the pod in /heocr; inputs in in/, results to out/")

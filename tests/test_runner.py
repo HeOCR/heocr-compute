@@ -380,6 +380,28 @@ class RunnerTest(unittest.TestCase):
         self.assertTrue(self.api.terminated)
 
 
+class SizedProfileTest(unittest.TestCase):
+    def test_sized_cpu_profile(self):
+        p = profiles.PROFILES["cpu"].sized("cpu5c", 16)
+        self.assertEqual(p.pod_type, "cpu5cx16")
+        self.assertEqual(p.body("heocr-cpu-x", {})["cpu"], {"id": "cpu5c", "vcpuCount": 16})
+        self.assertEqual(profiles.PROFILES["cpu"].sized(vcpus=8).pod_type, "cpu3cx8")
+        self.assertAlmostEqual(profiles.live_compute_price(FakeAPI(), p.sized("cpu3c", 16)), 0.03 * 16)
+
+    def test_bad_sizes_refused(self):
+        with self.assertRaises(ValueError):
+            profiles.PROFILES["cpu"].sized(vcpus=12)
+        with self.assertRaises(ValueError):
+            profiles.PROFILES["gpu"].sized(vcpus=8)
+
+    def test_cli_flags(self):
+        from heocr_compute.remote import cli
+        a = SimpleNamespace(profile="cpu", cpu_flavor="cpu5c", vcpus=16, community=False)
+        self.assertEqual(cli._profile(a).pod_type, "cpu5cx16")
+        a = SimpleNamespace(profile="cpu", cpu_flavor=None, vcpus=None, community=False)
+        self.assertEqual(cli._profile(a).pod_type, "cpu3cx32")
+
+
 class ReturnableTest(unittest.TestCase):
     def test_rules(self):
         r = runner.returnable

@@ -27,7 +27,7 @@ heocr-remote sweep --dry-run                     # orphaned heocr pods
 | `gpu --community` | the same on the community cloud | $0.35/h | 4 h (worst case $1.50) |
 | `smoke` | 2 vCPUs (`cpu3c`) | $0.06/h | 30 min (worst case $0.05) |
 
-The `cpu` profile is sized for 4–8 lstmtraining runs side by side, eight at their usual four OpenMP threads. Prices are never taken from this table: every run reads the live catalogue price first. The images are RunPod's own:
+When the default size has no capacity, `--cpu-flavor` and `--vcpus` (a power of two) choose another CPU size for `quote` and `run`; the caps and the live price check are unchanged. The `cpu` profile is sized for 4–8 lstmtraining runs side by side, eight at their usual four OpenMP threads. Prices are never taken from this table: every run reads the live catalogue price first. The images are RunPod's own:
 - `runpod/base:1.0.2-ubuntu2404` for the CPU profiles;
 - `runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404` for the GPU profile.
 
