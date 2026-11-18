@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "heocr-compute"
+version = "0.1.0"
+description = "Open-data training and engine runs for HeOCR on rented machines, inside a budget"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "HeOCR maintainers" }]
+dependencies = []
+
+[project.scripts]
+heocr-remote = "heocr_compute.remote.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["heocr_compute*"]

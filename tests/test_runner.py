@@ -1,0 +1,348 @@
+import datetime as dt
+import hashlib
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+from heocr_compute.remote import budget, manifest, profiles, runner
+from heocr_compute.remote.ledger import Ledger
+from heocr_compute.remote.policy import Policy
+from heocr_compute.remote.runner import Interrupted, Runner, Spec, sweep
+from heocr_compute.remote.ssh import SSHError
+
+NOW = dt.datetime(2026, 11, 18, 12, 0, tzinfo=dt.timezone.utc)
+
+
+class Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+    def sleep(self, s):
+        self.t += s
+
+
+class FakeAPI:
+    def __init__(self, cost=0.06, balance=5.0, status="RUNNING"):
+        self.cost, self._balance, self.status = cost, balance, status
+        self.created, self.terminated, self.pods = [], [], {}
+        self.terminate_works = True
+
+    def balance(self):
+        return self._balance
+
+    def cpu_vcpu_range(self, flavor):
+        return 2, 32
+
+    def cpu_price_per_vcpu(self, flavor):
+        return 0.03
+
+    def gpu_price(self, gpu, cloud):
+        return 0.89
+
+    def create_pod(self, body):
+        self.created.append(body)
+        pid = f"pod{len(self.created)}"
+        self.pods[pid] = {"id": pid, "name": body["name"], "cost": self.cost, "status": self.status,
+                          "createdAt": NOW.isoformat()}
+        return dict(self.pods[pid])
+
+    def get_pod(self, pid):
+        p = self.pods.get(pid)
+        if p is None:
+            return None
+        return {**p, "ssh": {"direct": {"host": "h", "port": 22, "username": "root"}}}
+
+    def list_pods(self):
+        return [dict(p) for p in self.pods.values()]
+
+    def terminate(self, pid):
+        self.terminated.append(pid)
+        if self.terminate_works:
+            self.pods.pop(pid, None)
+
+
+class FakeRemote:
+    """A pod's file system and shell, as far as the runner uses them."""
+
+    def __init__(self, out_files, exit_code="0", fail_on=None, corrupt_once=()):
+        self.out_files = out_files
+        self.exit_code = exit_code
+        self.fail_on = fail_on
+        self.uploaded = None
+        self.corrupt = set(corrupt_once)
+        self.commands = []
+
+    def run(self, command, input=None, timeout=600, check=True):
+        self.commands.append(command)
+        if self.fail_on and self.fail_on in command:
+            exc = self.fail_on_exc if hasattr(self, "fail_on_exc") else SSHError("boom")
+            raise exc
+        ok = SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "runpodctl" in command:
+            ok.stdout = "armed\n"
+        elif command.startswith("cat /heocr/exit_code"):
+            ok.stdout = self.exit_code
+        elif "find . -type f" in command:
+            ok.stdout = "".join(f"{len(b)}\t{rel}\n" for rel, b in self.out_files.items())
+        elif "sha256sum --" in command:
+            ok.stdout = "".join(f"{hashlib.sha256(b).hexdigest()}  {rel}\n" for rel, b in self.out_files.items()
+                                if rel in command)
+        return ok
+
+    def upload(self, root, rels, dest):
+        self.uploaded = list(rels)
+
+    def download(self, src, rels, dest):
+        for rel in rels:
+            f = Path(dest) / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            body = self.out_files[rel]
+            if rel in self.corrupt:
+                self.corrupt.discard(rel)
+                body = b"corrupted in transit"
+            f.write_bytes(body)
+        return list(rels)
+
+
+OUT = {
+    "job.log": b"invented log line\n",
+    "scores/score.json": b'{"cer": 0.01}\n',
+    "final_checkpoint": b"\x00" * 64,
+    "heb.traineddata": b"\x01" * 32,
+    "heb_1.234_10_100.checkpoint": b"\x02" * 16,   # intermediate: stays on the pod
+    "page.png": b"\x89PNG",                         # not a checkpoint, log or score
+}
+
+
+class RunnerTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.inputs = d / "inputs"
+        self.inputs.mkdir()
+        (self.inputs / "lines.txt").write_text("invented training line\n")
+        (self.inputs / "job.sh").write_text("echo invented\n")
+        (d / "roots.toml").write_text(f'[roots]\nsynthetic = ["{self.inputs}"]\n')
+        (d / "deny.txt").write_text("*/invented-private/*\n")
+        self.policy = Policy.load(str(d / "roots.toml"), str(d / "deny.txt"))
+        manifest.dump(manifest.build(self.inputs, self.policy), d / "inputs.json")
+        self.manifest = d / "inputs.json"
+        self.results = d / "results"
+        self.clock = Clock()
+        self.ledger = Ledger(d / "state" / "spend.jsonl", now=lambda: NOW)
+        self.api = FakeAPI()
+        self.patch = mock.patch.object(runner, "public_key", lambda: "ssh-ed25519 AAAAinvented test")
+        self.patch.start()
+
+    def tearDown(self):
+        self.patch.stop()
+        self.tmp.cleanup()
+
+    def spec(self, **kw):
+        args = dict(profile=profiles.PROFILES["smoke"], manifest_path=self.manifest, root=self.inputs,
+                    cmd="bash in/job.sh", hours=0.25, run_cap=0.5, results=self.results, yes=True,
+                    policy=self.policy)
+        args.update(kw)
+        return Spec(**args)
+
+    def make(self, remote):
+        return Runner(self.api, self.ledger, out=lambda *a: None, sleep=self.clock.sleep, clock=self.clock,
+                      now=lambda: NOW, poll_seconds=30, remote_factory=lambda pod: remote, keep_awake=False)
+
+    def final(self):
+        return [e for e in self.ledger.events() if e["event"] == "final"]
+
+    def test_end_to_end(self):
+        remote = FakeRemote(dict(OUT))
+        res = self.make(remote).run(self.spec())
+        self.assertEqual(res["status"], "ok", res)
+        self.assertEqual(sorted(res["pulled"]), ["final_checkpoint", "heb.traineddata", "job.log", "scores/score.json"])
+        dest = self.results / res["run_id"]
+        self.assertFalse((dest / "page.png").exists())
+        self.assertFalse((dest / "heb_1.234_10_100.checkpoint").exists())
+        sums = manifest.parse_sha256sum((dest / "SHA256SUMS").read_text())
+        for rel, digest in sums.items():
+            self.assertEqual(manifest.sha256_file(dest / rel), digest)
+        self.assertEqual(sorted(remote.uploaded), ["job.sh", "lines.txt"])
+        self.assertTrue(any("sha256sum -c" in c for c in remote.commands))
+        self.assertEqual(self.api.terminated, [res["pod_id"]])
+        body = self.api.created[0]
+        self.assertTrue(body["name"].startswith("heocr-smoke-"))
+        self.assertEqual(body["cpu"], {"id": "cpu3c", "vcpuCount": 2})
+        self.assertTrue(body["startSsh"])
+        [f] = self.final()
+        self.assertEqual(f["status"], "ok")
+        self.assertEqual(f["pod_type"], "cpu3cx2")
+        self.assertGreater(f["usd"], 0)
+        self.assertEqual(self.ledger.month_to_date()["open_estimate"], 0)
+
+    def test_corrupted_transfer_is_fetched_again(self):
+        remote = FakeRemote(dict(OUT), corrupt_once={"heb.traineddata"})
+        res = self.make(remote).run(self.spec())
+        self.assertEqual(res["status"], "ok", res)
+        dest = self.results / res["run_id"]
+        self.assertEqual((dest / "heb.traineddata").read_bytes(), OUT["heb.traineddata"])
+
+    def test_dry_run_creates_nothing(self):
+        res = self.make(FakeRemote(dict(OUT))).run(self.spec(dry_run=True))
+        self.assertEqual(res["status"], "dry_run")
+        self.assertEqual(self.api.created, [])
+        self.assertEqual(self.ledger.events(), [])
+
+    def test_budget_refusal_creates_nothing(self):
+        with self.assertRaises(budget.BudgetRefused):
+            self.make(FakeRemote(dict(OUT))).run(self.spec(profile=profiles.PROFILES["cpu"], hours=12))
+        self.assertEqual(self.api.created, [])
+        self.assertEqual(self.ledger.events(), [])
+
+    def test_month_cap_counts_open_runs(self):
+        self.ledger.reserve("x", pod_type="cpu3cx32", usd_est=149.99)
+        with self.assertRaises(budget.BudgetRefused):
+            self.make(FakeRemote(dict(OUT))).run(self.spec())
+        self.assertEqual(self.api.created, [])
+
+    def test_changed_input_refused_before_any_pod(self):
+        (self.inputs / "lines.txt").write_text("changed after the manifest\n")
+        with self.assertRaises(manifest.ManifestError):
+            self.make(FakeRemote(dict(OUT))).run(self.spec())
+        self.assertEqual(self.api.created, [])
+
+    def test_error_terminates_pod(self):
+        remote = FakeRemote(dict(OUT))
+        remote.upload = mock.Mock(side_effect=SSHError("connection reset"))
+        res = self.make(remote).run(self.spec())
+        self.assertEqual(res["status"], "error")
+        self.assertIn("connection reset", res["error"])
+        self.assertEqual(self.api.terminated, [res["pod_id"]])
+        self.assertEqual(self.final()[0]["status"], "error")
+
+    def test_ctrl_c_terminates_pod(self):
+        remote = FakeRemote(dict(OUT), fail_on="cat /heocr/exit_code")
+        remote.fail_on_exc = Interrupted("SIGINT")
+        res = self.make(remote).run(self.spec())
+        self.assertEqual(res["status"], "interrupted")
+        self.assertEqual(self.api.terminated, [res["pod_id"]])
+        self.assertEqual(self.final()[0]["status"], "interrupted")
+
+    def test_wall_time_limit(self):
+        remote = FakeRemote(dict(OUT), exit_code="")  # the job never finishes
+        res = self.make(remote).run(self.spec())
+        self.assertEqual(res["status"], "timeout")
+        self.assertEqual(self.api.terminated, [res["pod_id"]])
+        self.assertIn("job.log", res["pulled"])  # logs still come back
+        self.assertLessEqual(self.final()[0]["hours"], 0.25 + 0.01)
+
+    def test_job_timeout_exit_code(self):
+        res = self.make(FakeRemote(dict(OUT), exit_code="124")).run(self.spec())
+        self.assertEqual(res["status"], "timeout")
+
+    def test_job_failure(self):
+        res = self.make(FakeRemote(dict(OUT), exit_code="3")).run(self.spec())
+        self.assertEqual(res["status"], "job_failed")
+        self.assertEqual(self.api.terminated, [res["pod_id"]])
+
+    def test_price_above_quote_terminates_at_once(self):
+        self.api.cost = 0.5
+        res = self.make(FakeRemote(dict(OUT))).run(self.spec())
+        self.assertEqual(res["status"], "error")
+        self.assertIn("over the quote", res["error"])
+        self.assertEqual(self.api.terminated, [res["pod_id"]])
+
+    def test_failed_termination_keeps_reservation_open(self):
+        self.api.terminate_works = False
+        res = self.make(FakeRemote(dict(OUT))).run(self.spec())
+        self.assertEqual(self.final(), [])
+        self.assertGreater(self.ledger.month_to_date()["open_estimate"], 0)
+        self.assertIn(res["pod_id"], self.api.pods)
+
+    def test_lost_create_response_still_terminates(self):
+        real = self.api.create_pod
+
+        def create_then_fail(body):
+            real(body)
+            raise OSError("response lost")
+        self.api.create_pod = create_then_fail
+        res = self.make(FakeRemote(dict(OUT))).run(self.spec())
+        self.assertEqual(res["status"], "error")
+        self.assertEqual(self.api.terminated, ["pod1"])
+        self.assertEqual(self.api.pods, {})
+
+    def test_pull_size_cap(self):
+        res = self.make(FakeRemote(dict(OUT))).run(self.spec(max_pull_gb=1e-9))
+        self.assertEqual(res["status"], "error")
+        self.assertIn("max-pull-gb", res["error"])
+        self.assertTrue(self.api.terminated)
+
+
+class ReturnableTest(unittest.TestCase):
+    def test_rules(self):
+        r = runner.returnable
+        self.assertIsNone(r("heb_checkpoint", ("**",), False))
+        self.assertIsNone(r("best/heb.traineddata", ("**",), False))
+        self.assertIsNone(r("eval/scores.tsv", ("**",), False))
+        self.assertEqual(r("heb_0.512_120_9000.checkpoint", ("**",), False), "intermediate checkpoint")
+        self.assertIsNone(r("heb_0.512_120_9000.checkpoint", ("**",), True))
+        self.assertEqual(r("lines/page.png", ("**",), False), "not a checkpoint, log or score file")
+        self.assertEqual(r("job.log", ("scores/*",), False), "not matched by --pull")
+
+
+class SweepTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ledger = Ledger(Path(self.tmp.name) / "spend.jsonl", now=lambda: NOW)
+        self.api = FakeAPI()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def pod(self, pid, name):
+        self.api.pods[pid] = {"id": pid, "name": name, "cost": 0.96, "createdAt": "2026-11-18T10:00:00Z"}
+
+    def test_sweep(self):
+        import socket
+        host = socket.gethostname()
+        later = (NOW + dt.timedelta(hours=5)).isoformat()
+        earlier = (NOW - dt.timedelta(minutes=1)).isoformat()
+        rid = "20261118-100000-{}".format
+        self.ledger.reserve(rid("aaaa"), pod_type="cpu3cx32", usd_est=12, host=host, pid=101, deadman_utc=later)
+        self.ledger.final(rid("aaaa"), pod_type="cpu3cx32", hours=1, usd=1, status="ok")
+        self.ledger.reserve(rid("bbbb"), pod_type="cpu3cx32", usd_est=12, host=host, pid=102, deadman_utc=later)
+        self.ledger.reserve(rid("cccc"), pod_type="cpu3cx32", usd_est=12, host=host, pid=103, deadman_utc=later)
+        self.ledger.reserve(rid("dddd"), pod_type="cpu3cx32", usd_est=12, host=host, pid=103, deadman_utc=earlier)
+        self.ledger.reserve(rid("ffff"), pod_type="cpu3cx32", usd_est=12, host="other-mac", pid=102,
+                            deadman_utc=later)
+        self.pod("p1", "heocr-cpu-" + rid("aaaa"))   # its run finished: orphan
+        self.pod("p2", "heocr-cpu-" + rid("bbbb"))   # its runner is gone
+        self.pod("p3", "heocr-cpu-" + rid("cccc"))   # live run: kept
+        self.pod("p4", "heocr-cpu-" + rid("dddd"))   # past its deadline
+        self.pod("p5", "heocr-gpu-" + rid("eeee"))   # not in the ledger
+        self.pod("p6", "heocr-cpu-" + rid("ffff"))   # another machine's live run: kept
+        self.pod("p7", "someone-elses-pod")          # not ours: untouched
+        killed = sweep(self.api, self.ledger, now=lambda: NOW, out=lambda *a: None, sleep=lambda s: None,
+                       pid_alive=lambda pid: pid == 103)
+        self.assertEqual(sorted(killed), ["p1", "p2", "p4", "p5"])
+        self.assertEqual(sorted(self.api.pods), ["p3", "p6", "p7"])
+        swept = {e["run_id"][-4:]: e for e in self.ledger.events() if e.get("status") == "swept"}
+        self.assertEqual(sorted(swept), ["bbbb", "dddd"])   # finals written for open runs only
+        self.assertAlmostEqual(swept["bbbb"]["hours"], 2.0)  # from the pod's createdAt
+        self.assertAlmostEqual(swept["bbbb"]["usd"], 1.92)
+        self.assertEqual(self.ledger.month_to_date()["open_estimate"], 24)  # cccc and ffff
+
+    def test_sweep_all_and_dry_run(self):
+        self.pod("p1", "heocr-cpu-20261118-100000-aaaa")
+        self.pod("p2", "other")
+        self.assertEqual(sweep(self.api, self.ledger, everything=True, dry_run=True, out=lambda *a: None), [])
+        self.assertIn("p1", self.api.pods)
+        self.assertEqual(sweep(self.api, self.ledger, everything=True, out=lambda *a: None,
+                               sleep=lambda s: None), ["p1"])
+        self.assertIn("p2", self.api.pods)
+
+
+if __name__ == "__main__":
+    unittest.main()
