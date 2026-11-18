@@ -18,7 +18,7 @@ import tempfile
 from pathlib import Path
 
 from . import budget, manifest, profiles
-from .api import RunPod, RunPodError, load_key
+from .api import RunPod, RunPodError, load_account, load_key
 from .policy import Policy, Refused
 from .ledger import Ledger, state_dir
 from .runner import RunFailed, Runner, Spec, sweep
@@ -35,8 +35,12 @@ echo not-returned > out/page.png
 """
 
 
-def _api():
-    return RunPod(load_key())
+def _connect():
+    """The RunPod client and this account's ledger, after checking the key is HeOCR's account's."""
+    expected = load_account()
+    api = RunPod(load_key())
+    label = api.check_account(expected)
+    return api, Ledger(account=label)
 
 
 def _profile(a) -> profiles.Profile:
@@ -50,7 +54,7 @@ def cmd_profiles(a):
 
 
 def cmd_quote(a):
-    api, led = _api(), Ledger()
+    api, led = _connect()
     p = _profile(a)
     hours = a.hours or p.default_hours
     compute = profiles.live_compute_price(api, p)
@@ -91,7 +95,7 @@ def _report(res) -> int:
 def cmd_run(a):
     root = Path(a.root) if a.root else Path(a.manifest).resolve().parent
     spec = _spec(a, _profile(a), a.manifest, root, a.cmd, a.run_cap)
-    return _report(Runner(_api(), Ledger()).run(spec))
+    return _report(Runner(*_connect()).run(spec))
 
 
 def cmd_smoke(a):
@@ -107,7 +111,7 @@ def cmd_smoke(a):
     spec.policy = policy
     spec.prove_deadman = True
     try:
-        return _report(Runner(_api(), Ledger()).run(spec))
+        return _report(Runner(*_connect()).run(spec))
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -129,10 +133,11 @@ def cmd_policy(a):
 
 
 def cmd_spend(a):
-    led = Ledger()
+    label = load_account()["label"]
+    led = Ledger(account=label)
     m = led.month_to_date(a.month)
     usd = lambda x: f"${x:.2f}" if x == 0 or x >= 1 else f"${x:.4f}"
-    print(f"{m['month']}: {usd(m['spent'])} spent in {len(m['finals'])} runs"
+    print(f"{m['month']}, account {label}: {usd(m['spent'])} spent in {len(m['finals'])} runs"
           f" + {usd(m['open_estimate'])} reserved by {len(m['open'])} open runs"
           f" = {usd(m['total'])} of ${budget.MONTH_CAP_USD:.2f} this month")
     for r in m["finals"]:
@@ -141,11 +146,14 @@ def cmd_spend(a):
     for r in m["open"]:
         e = r["reserve"]
         print(f"  {e['date']}  {e['pod_type']:40} open, up to ${e['usd_est']:.2f}")
+    if m["others"]:
+        print(f"not counted: {len(m['others'])} runs ({usd(m['other_spent'])}) on other or untagged accounts")
     print(f"ledger: {led.path}")
 
 
 def cmd_sweep(a):
-    killed = sweep(_api(), Ledger(), everything=a.all, dry_run=a.dry_run)
+    api, led = _connect()
+    killed = sweep(api, led, everything=a.all, dry_run=a.dry_run)
     print(f"sweep: {len(killed)} pods terminated")
 
 

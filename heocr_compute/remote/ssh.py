@@ -1,8 +1,8 @@
 """SSH to a pod: commands, and tar streams for files in and out.
 
-Uses the key runpodctl made (``~/.runpod/ssh/runpodctl-ssh-key``); its public half is also passed to the
-pod as ``PUBLIC_KEY``, which RunPod's images add to ``authorized_keys``. Host keys of short-lived pods
-are not recorded.
+Uses HeOCR's own key pair, ``~/.config/heocr/remote/ssh/id_ed25519``, made on first use. Its public half
+is passed to the pod as ``PUBLIC_KEY``, which RunPod's images add to ``authorized_keys``, so the key needs
+no registration with any account. Host keys of short-lived pods are not recorded.
 """
 from __future__ import annotations
 
@@ -12,11 +12,21 @@ import subprocess
 import tarfile
 from pathlib import Path
 
-KEY = "~/.runpod/ssh/runpodctl-ssh-key"
+KEY = "~/.config/heocr/remote/ssh/id_ed25519"
+
+
+def ensure_key(key: str = KEY) -> Path:
+    path = Path(os.path.expanduser(key))
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o700)
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "heocr-remote", "-f", str(path)],
+                       check=True)
+    return path
 
 
 def public_key(key: str = KEY) -> str:
-    return Path(os.path.expanduser(key + ".pub")).read_text(encoding="utf-8").strip()
+    return Path(str(ensure_key(key)) + ".pub").read_text(encoding="utf-8").strip()
 
 
 class SSHError(Exception):

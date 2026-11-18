@@ -11,6 +11,10 @@ Month-to-date spend counts every ``final``, plus the estimate of every reservati
 progress, or one whose runner died before finishing). So a crash can only overstate the month, never
 understate it. ``sweep`` writes the missing ``final`` when it terminates an orphaned pod.
 
+Every event carries the RunPod account it ran on (``account``, the label from the account file). The
+month's total, and so the monthly cap, counts only the current account's runs. Runs on other accounts,
+or from before accounts were tagged, stay in the file as history and are reported apart.
+
 Reserving takes an exclusive lock on the ledger, so two runners cannot both pass the monthly cap check.
 """
 from __future__ import annotations
@@ -41,10 +45,11 @@ def month_of(ts: str) -> str:
 
 
 class Ledger:
-    def __init__(self, path: Path | None = None, now=utcnow):
+    def __init__(self, path: Path | None = None, now=utcnow, account: str | None = None):
         self.path = Path(path) if path else state_dir() / "spend.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.now = now
+        self.account = account
 
     @contextlib.contextmanager
     def locked(self):
@@ -66,7 +71,8 @@ class Ledger:
         return out
 
     def append(self, event: dict) -> dict:
-        event = {"date": self.now().isoformat(timespec="seconds"), **event}
+        event = {"date": self.now().isoformat(timespec="seconds"),
+                 **({"account": self.account} if self.account else {}), **event}
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
             f.flush()
@@ -81,20 +87,34 @@ class Ledger:
             r[e["event"]] = e
         return runs
 
+    def _counts(self, r: dict) -> bool:
+        """Whether a run counts towards this ledger's account (all runs when no account is set)."""
+        if self.account is None:
+            return True
+        first = r.get("reserve") or r.get("final") or {}
+        return first.get("account") == self.account
+
     def month_to_date(self, month: str | None = None) -> dict:
         month = month or self.now().strftime("%Y-%m")
-        spent = open_est = 0.0
-        finals, open_runs = [], []
+        spent = open_est = other = 0.0
+        finals, open_runs, others = [], [], []
         for r in self.runs().values():
-            if "final" in r:
-                if month_of(r["final"]["date"]) == month:
-                    spent += float(r["final"]["usd"])
-                    finals.append(r)
-            elif "reserve" in r and month_of(r["reserve"]["date"]) == month:
+            ev = r.get("final") or r.get("reserve")
+            if not ev or month_of(ev["date"]) != month:
+                continue
+            if not self._counts(r):
+                if "final" in r:
+                    other += float(r["final"]["usd"])
+                others.append(r)
+            elif "final" in r:
+                spent += float(r["final"]["usd"])
+                finals.append(r)
+            else:
                 open_est += float(r["reserve"]["usd_est"])
                 open_runs.append(r)
-        return {"month": month, "spent": round(spent, 4), "open_estimate": round(open_est, 4),
-                "total": round(spent + open_est, 4), "finals": finals, "open": open_runs}
+        return {"month": month, "account": self.account, "spent": round(spent, 4),
+                "open_estimate": round(open_est, 4), "total": round(spent + open_est, 4),
+                "finals": finals, "open": open_runs, "other_spent": round(other, 4), "others": others}
 
     def reserve(self, run_id: str, **fields) -> dict:
         return self.append({"event": "reserve", "run_id": run_id, "pid": os.getpid(), **fields})

@@ -119,9 +119,29 @@ Month to date (UTC months) counts every final, plus the worst case of every rese
 
 It writes the missing final record for each one. Every `run` sweeps first. `--all` also terminates live runs, and `--dry-run` only lists. To sweep regularly, add it to cron or launchd, for example every 30 minutes.
 
-## Credentials
+## Credentials and the account
 
-The RunPod API key comes from `RUNPOD_API_KEY` or `~/.runpod/config.toml` (`apikey`), read at run time. It goes only into the `Authorization` header and is never printed or written. SSH uses the key runpodctl created (`~/.runpod/ssh/runpodctl-ssh-key`), whose public half is passed to the pod.
+- **API key.** It is read only from HeOCR's own key file, `~/.config/heocr/runpod.toml` (`apikey = "..."`, mode 600), or the file that `HEOCR_RUNPOD_CONFIG` names.
+  - No other tool's configuration is read.
+  - The `RUNPOD_API_KEY` variable is ignored too, since it may hold another project's key.
+  - The key goes only into the `Authorization` header and is never printed or written.
+- **Scopes.** The runner needs:
+  - REST pods, read and write;
+  - the catalogue, read;
+  - GraphQL, read: the balance and the account's email;
+  - billing, read: optional, for checking the ledger against RunPod's bills.
+
+  The pod removes itself with RunPod's own pod-scoped key, not with this one.
+- **Account check.** Before every command that calls RunPod, the runner asks which account the key belongs to, and refuses unless it is the one in a local file that is never committed:
+
+  ```toml
+  # ~/.config/heocr/remote_account.toml (or HEOCR_REMOTE_ACCOUNT)
+  email = "..."      # the account's login address
+  label = "heocr"    # how the ledger tags this account's runs
+  ```
+
+  The ledger tags every event with that label. The month's total, and so the cap, counts only the current account's runs. Earlier or other-account runs stay in the file as history, and `spend` reports them apart.
+- **SSH** uses HeOCR's own key pair, `~/.config/heocr/remote/ssh/id_ed25519`, made on first use. Its public half is passed to the pod, so it needs no registration with any account.
 
 ## Tests
 

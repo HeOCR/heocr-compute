@@ -1,8 +1,15 @@
-"""A small RunPod client (REST API v2, plus GraphQL for the balance), standard library only.
+"""A small RunPod client (REST API v2, plus GraphQL for the balance and account), standard library only.
 
-The API key comes from ``RUNPOD_API_KEY`` or ``~/.runpod/config.toml`` (``apikey``), read at run time.
-It is sent only in the ``Authorization`` header, never in a URL, and never printed: errors carry the
-method, path and status, not the request.
+The API key comes only from HeOCR's own key file, ``~/.config/heocr/runpod.toml`` (``apikey = "..."``),
+or the file ``HEOCR_RUNPOD_CONFIG`` names. Nothing else is read: no other tool's config and no
+``RUNPOD_API_KEY`` variable, since those may hold another project's key. The key is sent only in the
+``Authorization`` header, never in a URL, and never printed: errors carry the method, path and status.
+
+Before any run the runner checks that the key belongs to HeOCR's account. The expected account is in a
+local file, ``~/.config/heocr/remote_account.toml`` (or ``HEOCR_REMOTE_ACCOUNT``), never committed::
+
+    email = "..."      # the account's login address
+    label = "heocr"    # how the ledger tags this account's runs
 """
 from __future__ import annotations
 
@@ -16,7 +23,10 @@ import urllib.request
 from pathlib import Path
 
 API = "https://api.runpod.io"
-CONFIG = "~/.runpod/config.toml"
+CONFIG = "~/.config/heocr/runpod.toml"
+CONFIG_ENV = "HEOCR_RUNPOD_CONFIG"
+ACCOUNT = "~/.config/heocr/remote_account.toml"
+ACCOUNT_ENV = "HEOCR_REMOTE_ACCOUNT"
 USER_AGENT = "heocr-remote/0.1"
 
 
@@ -26,17 +36,30 @@ class RunPodError(Exception):
         self.status = status
 
 
-def load_key(env=None, config: str = CONFIG) -> str:
+def _config_path(env, var: str, default: str) -> Path:
     env = os.environ if env is None else env
-    key = env.get("RUNPOD_API_KEY")
-    if key:
-        return key
-    path = Path(os.path.expanduser(config))
-    if path.exists():
-        key = tomllib.loads(path.read_text(encoding="utf-8")).get("apikey")
-        if key:
-            return key
-    raise RunPodError(f"no RunPod API key: set RUNPOD_API_KEY or add apikey to {config}")
+    return Path(os.path.expanduser(env.get(var) or default))
+
+
+def load_key(env=None) -> str:
+    path = _config_path(env, CONFIG_ENV, CONFIG)
+    if not path.is_file():
+        raise RunPodError(f"no RunPod key file at {path} ({CONFIG_ENV} names another path)")
+    key = tomllib.loads(path.read_text(encoding="utf-8")).get("apikey")
+    if not key:
+        raise RunPodError(f"{path} has no apikey")
+    return key
+
+
+def load_account(env=None) -> dict:
+    path = _config_path(env, ACCOUNT_ENV, ACCOUNT)
+    if not path.is_file():
+        raise RunPodError(f"no expected account at {path}: nothing runs until it names HeOCR's account")
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    email = str(data.get("email") or "").strip().lower()
+    if "@" not in email:
+        raise RunPodError(f"{path} has no account email")
+    return {"email": email, "label": str(data.get("label") or "heocr")}
 
 
 def urllib_transport(method: str, url: str, headers: dict, body: bytes | None, timeout: float = 60):
@@ -96,6 +119,19 @@ class RunPod:
             return float(r["data"]["myself"]["clientBalance"])
         except (KeyError, TypeError) as e:
             raise RunPodError("balance: unexpected response") from e
+
+    def account_email(self) -> str:
+        r = self._call("POST", "/graphql", {"query": "query { myself { email } }"})
+        try:
+            return str(r["data"]["myself"]["email"] or "").strip().lower()
+        except (KeyError, TypeError) as e:
+            raise RunPodError("account: unexpected response") from e
+
+    def check_account(self, expected: dict) -> str:
+        """The account's ledger label, or RunPodError when the key belongs to any other account."""
+        if self.account_email() != expected["email"]:
+            raise RunPodError("the RunPod key is not for the configured account: refused")
+        return expected["label"]
 
     # live prices
     def cpu_price_per_vcpu(self, flavor: str) -> float:

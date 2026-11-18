@@ -244,7 +244,7 @@ class Runner:
                 self.out(line)
             budget.check(q)
             if spec.dry_run:
-                body = spec.profile.body(name, {"PUBLIC_KEY": "<runpodctl-ssh-key.pub>"})
+                body = spec.profile.body(name, {"PUBLIC_KEY": "<heocr-remote ssh public key>"})
                 self.out("dry run: would create " + json.dumps(body))
                 self.out(f"dry run: would run under timeout {self._job_seconds(spec):.0f}s: {spec.cmd}")
                 return {"run_id": run_id, "status": "dry_run", "quote": q.__dict__}
