@@ -1,0 +1,422 @@
+"""One remote run, start to finish, with the pod always terminated at the end.
+
+1. Sweep orphaned heocr pods.
+2. Check the inputs: manifest hashes, open roots and the local denylist (policy.py), upload size.
+3. Check the money: live price and balance, the per-run and monthly caps (budget.py), under the ledger's
+   lock; reserve the worst case in the ledger.
+4. Create the pod, check its billed price against the quote, wait for SSH, arm a dead-man's switch on the
+   pod (it removes itself after the wall-time limit plus a grace period, should this machine sleep or
+   lose its network).
+5. Upload by manifest; ``sha256sum -c`` on the pod.
+6. Start the job detached, under ``timeout``; poll for its exit code with short SSH calls.
+7. Pull back what the job left in ``/heocr/out``: checkpoints, logs and scores only, final ones by
+   default; verify every file's sha256 against the pod's.
+8. Terminate the pod (on success, error, timeout or Ctrl-C), confirm it is gone, write the ledger's final.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import fnmatch
+import json
+import os
+import re
+import secrets
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from . import budget, manifest, profiles
+from .policy import Policy
+from .ledger import Ledger, utcnow
+from .ssh import Remote, SSHError, public_key
+
+POD_PREFIX = "heocr-"
+POD_IN, POD_OUT, POD_EXIT = "/heocr/in", "/heocr/out", "/heocr/exit_code"
+READY_TIMEOUT = 20 * 60          # provisioning + image pull
+DEADMAN_GRACE = 15 * 60          # the pod removes itself this long after the wall-time limit
+PULL_RESERVE = 10 * 60           # wall time kept back for pulling results
+LOCAL_FREE_MARGIN = 1 << 30      # keep 1 GB free on this machine after a pull
+
+# What may come back: checkpoints, logs and scores.
+RESULT_SUFFIXES = (".checkpoint", "_checkpoint", ".traineddata", ".lstm", ".pt", ".pth", ".ckpt",
+                   ".safetensors", ".mlmodel", ".log", ".txt", ".json", ".jsonl", ".tsv", ".csv", ".md",
+                   ".yaml", ".yml", ".sha256")
+# lstmtraining's intermediate checkpoints (``<name>_<error>_<iter>_<iter>.checkpoint``): left on the pod
+# unless --pull-intermediate.
+INTERMEDIATE = re.compile(r"_\d+(\.\d+)?_\d+_\d+\.checkpoint$")
+
+
+class Interrupted(Exception):
+    pass
+
+
+class RunFailed(Exception):
+    pass
+
+
+@dataclass
+class Spec:
+    profile: profiles.Profile
+    manifest_path: Path
+    root: Path
+    cmd: str
+    hours: float
+    run_cap: float = budget.RUN_CAP_USD
+    month_cap: float = budget.MONTH_CAP_USD
+    pulls: tuple = ("**",)
+    pull_intermediate: bool = False
+    results: Path | None = None
+    max_pull_gb: float = 2.0
+    max_upload_gb: float = 20.0
+    dry_run: bool = False
+    yes: bool = False
+    policy: object = None     # policy.Policy; loaded from the local files when None
+
+
+def new_run_id(now: dt.datetime) -> str:
+    return now.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
+
+
+def pod_name(profile: str, run_id: str) -> str:
+    return f"{POD_PREFIX}{profile}-{run_id}"
+
+
+def run_id_of(name: str) -> str | None:
+    m = re.fullmatch(rf"{POD_PREFIX}[a-z0-9]+-(\d{{8}}-\d{{6}}-[0-9a-f]{{4}})", name or "")
+    return m.group(1) if m else None
+
+
+def returnable(rel: str, pulls, pull_intermediate: bool) -> str | None:
+    """Why ``rel`` is not pulled back, or None if it is."""
+    if not any(fnmatch.fnmatch(rel, g) for g in pulls):
+        return "not matched by --pull"
+    if not rel.lower().endswith(RESULT_SUFFIXES):
+        return "not a checkpoint, log or score file"
+    if not pull_intermediate and INTERMEDIATE.search(rel):
+        return "intermediate checkpoint"
+    return None
+
+
+def _parse_ts(s: str | None) -> dt.datetime | None:
+    if not s:
+        return None
+    try:
+        return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def terminate_confirmed(api, pod_id: str, sleep=time.sleep, attempts: int = 6) -> bool:
+    for i in range(attempts):
+        try:
+            api.terminate(pod_id)
+            pod = api.get_pod(pod_id)
+            if pod is None or pod.get("status") == "TERMINATED":
+                return True
+        except Exception:  # noqa: BLE001 - keep trying; the caller reports failure loudly
+            pass
+        sleep(min(30, 2 ** i))
+    return False
+
+
+def sweep(api, ledger: Ledger, *, everything: bool = False, dry_run: bool = False, now=utcnow,
+          pid_alive=_pid_alive, out=print, sleep=time.sleep) -> list[str]:
+    """Terminate heocr pods with no live runner: finished, past their deadline, or unknown here."""
+    host = socket.gethostname()
+    runs = ledger.runs()
+    killed = []
+    for pod in api.list_pods():
+        name = pod.get("name") or ""
+        if not name.startswith(POD_PREFIX):
+            continue
+        rid = run_id_of(name)
+        r = runs.get(rid) if rid else None
+        res = (r or {}).get("reserve") or {}
+        deadline = _parse_ts(res.get("deadman_utc"))
+        if everything:
+            why = "--all"
+        elif r is None:
+            why = "not in this machine's ledger"
+        elif "final" in r:
+            why = "its run already finished"
+        elif deadline and now() > deadline:
+            why = "past its deadline"
+        elif res.get("host") == host and not pid_alive(res.get("pid", -1)):
+            why = "its runner is gone"
+        else:
+            continue
+        out(f"sweep: {pod.get('id')} ({name}): {why}" + (" [dry run]" if dry_run else ""))
+        if dry_run:
+            continue
+        ok = terminate_confirmed(api, pod["id"], sleep=sleep)
+        if not ok:
+            out(f"sweep: POD {pod['id']} IS STILL RUNNING: terminate it in the RunPod console")
+            continue
+        killed.append(pod["id"])
+        if rid and r is not None and "final" not in r:
+            created = _parse_ts(pod.get("createdAt")) or _parse_ts(res.get("date")) or now()
+            secs = max(0.0, (now() - created).total_seconds())
+            rate = float(pod.get("cost") or (r.get("pod") or {}).get("usd_per_hr") or 0)
+            ledger.final(rid, pod_type=res.get("pod_type", "?"), hours=secs / 3600,
+                         usd=budget.billed(rate, secs), status="swept", pod_id=pod["id"])
+    return killed
+
+
+@dataclass
+class Runner:
+    api: object
+    ledger: Ledger
+    out: object = print
+    sleep: object = time.sleep
+    clock: object = time.monotonic
+    now: object = utcnow
+    poll_seconds: float = 60
+    remote_factory: object = Remote.from_pod
+    confirm: object = input
+    keep_awake: bool = True
+    _terminating: bool = field(default=False, init=False)
+
+    # -- preflight ---------------------------------------------------------------------------------
+    def check_inputs(self, spec: Spec):
+        entries = manifest.load(spec.manifest_path)
+        size = manifest.verify_local(entries, spec.root, spec.policy or Policy.load())
+        if size > spec.max_upload_gb * (1 << 30):
+            raise RunFailed(f"upload of {size / (1 << 30):.2f} GB is over --max-upload-gb {spec.max_upload_gb}")
+        return entries, size
+
+    def price(self, spec: Spec, month_spent: float) -> budget.Quote:
+        compute = profiles.live_compute_price(self.api, spec.profile)
+        return budget.quote(compute_usd_per_hour=compute, disk_gb=spec.profile.disk_gb, wall_hours=spec.hours,
+                            balance=self.api.balance(), month_spent=month_spent,
+                            run_cap=spec.run_cap, month_cap=spec.month_cap)
+
+    # -- the run -----------------------------------------------------------------------------------
+    def run(self, spec: Spec) -> dict:
+        sweep(self.api, self.ledger, out=self.out, sleep=self.sleep, now=self.now)
+        entries, size = self.check_inputs(spec)
+        self.out(f"inputs: {len(entries)} files, {size / (1 << 20):.1f} MB, hashes, open roots and local denylist checked")
+        run_id = new_run_id(self.now())
+        name = pod_name(spec.profile.name, run_id)
+        with self.ledger.locked():
+            q = self.price(spec, self.ledger.month_to_date()["total"])
+            for line in q.lines():
+                self.out(line)
+            budget.check(q)
+            if spec.dry_run:
+                body = spec.profile.body(name, {"PUBLIC_KEY": "<runpodctl-ssh-key.pub>"})
+                self.out("dry run: would create " + json.dumps(body))
+                self.out(f"dry run: would run under timeout {self._job_seconds(spec):.0f}s: {spec.cmd}")
+                return {"run_id": run_id, "status": "dry_run", "quote": q.__dict__}
+            if not spec.yes and self.confirm(f"start {spec.profile.pod_type}, worst case ${q.usd_est:.2f}? [y/N] ").strip().lower() != "y":
+                return {"run_id": run_id, "status": "declined"}
+            deadman = self.now() + dt.timedelta(hours=spec.hours) + dt.timedelta(seconds=DEADMAN_GRACE + budget.STARTUP_HOURS * 3600)
+            self.ledger.reserve(run_id, profile=spec.profile.name, pod_type=spec.profile.pod_type,
+                                usd_est=q.usd_est, hours_max=q.hours, host=socket.gethostname(),
+                                deadman_utc=deadman.isoformat(timespec="seconds"))
+        return self._execute(spec, entries, run_id, name, q)
+
+    def _job_seconds(self, spec: Spec) -> float:
+        return max(60.0, spec.hours * 3600 - PULL_RESERVE)
+
+    def _execute(self, spec, entries, run_id, name, q) -> dict:
+        pod_id, rate, t_created, status, error, pulled = None, q.usd_per_hour, None, "error", None, []
+        handlers = self._trap()
+        caffeinate = self._keep_awake()
+        t0 = self.clock()
+        try:
+            env = {"PUBLIC_KEY": public_key(), "HEOCR_RUN_ID": run_id}
+            pod = self.api.create_pod(spec.profile.body(name, env))
+            pod_id, t_created = pod["id"], self.clock()
+            billed_rate = float(pod.get("cost") or 0) or q.compute_usd_per_hour
+            rate = max(rate, billed_rate + budget.hourly(0, spec.profile.disk_gb))
+            self.ledger.pod(run_id, pod_id=pod_id, usd_per_hr=billed_rate)
+            self.out(f"pod {pod_id} created at ${billed_rate:.4f}/h")
+            if budget.overpriced(q, billed_rate):
+                raise RunFailed(f"pod billed ${billed_rate:.4f}/h, over the quote ${q.compute_usd_per_hour:.4f}/h")
+            remote = self._wait_ready(pod_id)
+            deadline = t0 + spec.hours * 3600
+            self._arm_deadman(remote, deadline)
+            self._upload(remote, spec, entries)
+            status = self._run_job(remote, spec, deadline)
+            pulled = self._pull(remote, spec, run_id)
+            if status == "ok":
+                self.out(f"done: {len(pulled)} files in {self._results_dir(spec, run_id)}")
+        except Interrupted:
+            status, error = "interrupted", "interrupted"
+            self.out("interrupted: terminating the pod")
+        except Exception as e:  # noqa: BLE001 - every failure ends with the pod terminated
+            status, error = ("error", f"{type(e).__name__}: {e}")
+            self.out(f"error: {error}")
+        finally:
+            self._terminating = True
+            gone = True
+            if pod_id is None:
+                pod_id = self._find_by_name(name)  # a create whose response was lost
+            if pod_id:
+                gone = terminate_confirmed(self.api, pod_id, sleep=self.sleep)
+                self.out(f"pod {pod_id} terminated" if gone else
+                         f"POD {pod_id} IS STILL RUNNING: run `heocr-remote sweep`, or terminate it in the console")
+            secs = (self.clock() - t_created) if t_created is not None else 0.0
+            if pod_id is None or gone:
+                usd = budget.billed(rate, secs) if pod_id else 0.0
+                self.ledger.final(run_id, pod_type=spec.profile.pod_type, hours=secs / 3600, usd=usd,
+                                  status=status, pod_id=pod_id, error=error, pulled=len(pulled))
+            self._untrap(handlers)
+            if caffeinate:
+                caffeinate.terminate()
+        return {"run_id": run_id, "pod_id": pod_id, "status": status, "error": error, "pulled": pulled}
+
+    def _find_by_name(self, name: str) -> str | None:
+        try:
+            for p in self.api.list_pods():
+                if p.get("name") == name:
+                    self.out(f"found pod {p['id']} from a create that reported failure")
+                    return p["id"]
+        except Exception:  # noqa: BLE001 - the sweeper catches it later
+            self.out(f"could not check for a pod named {name}: run `heocr-remote sweep`")
+        return None
+
+    # -- steps -------------------------------------------------------------------------------------
+    def _wait_ready(self, pod_id: str) -> Remote:
+        start = self.clock()
+        remote = None
+        while self.clock() - start < READY_TIMEOUT:
+            pod = self.api.get_pod(pod_id)
+            if pod is None or pod.get("status") in ("ERROR", "TERMINATED", "EXITED"):
+                raise RunFailed(f"pod {pod_id} is {pod and pod.get('status')}")
+            if pod.get("status") == "RUNNING":
+                remote = self.remote_factory(pod)
+                if remote is not None:
+                    try:
+                        remote.run("true", timeout=60)
+                        return remote
+                    except SSHError:
+                        pass
+            self.sleep(10)
+        raise RunFailed(f"pod {pod_id} not reachable over SSH within {READY_TIMEOUT // 60} min")
+
+    def _arm_deadman(self, remote, deadline: float) -> None:
+        secs = int(max(60, deadline - self.clock()) + DEADMAN_GRACE)
+        cmd = ('if [ -n "$RUNPOD_POD_ID" ] && [ -n "$RUNPOD_API_KEY" ] && command -v runpodctl >/dev/null; then '
+               f'nohup setsid sh -c "sleep {secs}; runpodctl remove pod \\"\\$RUNPOD_POD_ID\\"" '
+               '>/dev/null 2>&1 < /dev/null & echo armed; else echo unavailable; fi')
+        r = remote.run(cmd, timeout=60, check=False)
+        state = (r.stdout or "").strip() or "unavailable"
+        self.out(f"dead-man's switch: {state} ({secs // 60} min)" +
+                 ("" if state == "armed" else "; the sweeper is the only backstop"))
+
+    def _upload(self, remote, spec, entries) -> None:
+        remote.upload(spec.root, [e.path for e in entries], POD_IN)
+        remote.run(f"cat > /heocr/in.sha256", input=manifest.sha256sum_text(entries), timeout=120)
+        r = remote.run(f"cd {POD_IN} && sha256sum -c --quiet /heocr/in.sha256", timeout=3600, check=False)
+        if r.returncode != 0:
+            raise RunFailed("inputs failed sha256 on the pod: " + (r.stdout + r.stderr).strip()[-300:])
+        self.out(f"uploaded {len(entries)} files, sha256 verified on the pod")
+
+    def _run_job(self, remote, spec, deadline: float) -> str:
+        secs = int(max(60, min(self._job_seconds(spec), deadline - self.clock() - PULL_RESERVE)))
+        inner = f"timeout --signal=TERM --kill-after=120 {secs} bash -lc {shlex.quote(spec.cmd)} > {POD_OUT}/job.log 2>&1; echo $? > {POD_EXIT}"
+        remote.run(f"mkdir -p {POD_OUT} /heocr/work && cd /heocr && "
+                   f"nohup setsid bash -c {shlex.quote(inner)} > /dev/null 2>&1 < /dev/null &", timeout=60)
+        self.out(f"job started, limit {secs // 60} min")
+        failures = 0
+        while self.clock() < deadline:
+            self.sleep(self.poll_seconds)
+            try:
+                r = remote.run(f"cat {POD_EXIT} 2>/dev/null || true", timeout=60, check=False)
+                failures = 0
+            except SSHError:
+                failures += 1
+                self.out(f"poll: SSH failed ({failures} in a row)")
+                continue
+            code = (r.stdout or "").strip()
+            if code:
+                code = int(code)
+                self.out(f"job exited {code}")
+                return "ok" if code == 0 else ("timeout" if code == 124 else "job_failed")
+        return "timeout"
+
+    def _results_dir(self, spec, run_id) -> Path:
+        return Path(spec.results or Path("~/heocr-remote/results").expanduser()) / run_id
+
+    def _pull(self, remote, spec, run_id) -> list[str]:
+        r = remote.run(f"cd {POD_OUT} && find . -type f -printf '%s\\t%P\\n'", timeout=600)
+        sizes = {}
+        for line in r.stdout.splitlines():
+            if "\t" in line:
+                n, rel = line.split("\t", 1)
+                sizes[manifest.safe_rel(rel)] = int(n)
+        chosen, skipped = [], {}
+        for rel in sorted(sizes):
+            why = returnable(rel, spec.pulls, spec.pull_intermediate)
+            (skipped.__setitem__(rel, why) if why else chosen.append(rel))
+        for rel, why in skipped.items():
+            self.out(f"left on the pod: {rel} ({why})")
+        if not chosen:
+            return []
+        total = sum(sizes[r] for r in chosen)
+        if total > spec.max_pull_gb * (1 << 30):
+            raise RunFailed(f"results are {total / (1 << 30):.2f} GB, over --max-pull-gb {spec.max_pull_gb}")
+        dest = self._results_dir(spec, run_id)
+        dest.mkdir(parents=True, exist_ok=True)
+        if shutil.disk_usage(dest).free < total + LOCAL_FREE_MARGIN:
+            raise RunFailed(f"not enough free disk here for {total / (1 << 20):.0f} MB of results")
+        listing = remote.run(f"cd {POD_OUT} && sha256sum -- " + " ".join(shlex.quote(c) for c in chosen), timeout=3600)
+        want = manifest.parse_sha256sum(listing.stdout)
+        bad = self._fetch(remote, chosen, want, dest)
+        if bad:
+            bad = self._fetch(remote, bad, want, dest)
+        if bad:
+            raise RunFailed(f"sha256 mismatch after retry: {', '.join(bad)}")
+        (dest / "SHA256SUMS").write_text("".join(f"{want[c]}  {c}\n" for c in chosen), encoding="utf-8")
+        self.out(f"pulled {len(chosen)} files ({total / (1 << 20):.1f} MB), sha256 verified")
+        return chosen
+
+    def _fetch(self, remote, rels, want, dest) -> list[str]:
+        remote.download(POD_OUT, rels, dest)
+        bad = []
+        for rel in rels:
+            f = dest / rel
+            if not f.is_file() or manifest.sha256_file(f) != want.get(rel):
+                bad.append(rel)
+                if f.exists():
+                    f.unlink()
+        return bad
+
+    # -- signals and sleep -------------------------------------------------------------------------
+    def _trap(self):
+        def handler(signum, frame):
+            if not self._terminating:
+                raise Interrupted(signal.Signals(signum).name)
+        saved = {}
+        for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            try:
+                saved[s] = signal.signal(s, handler)
+            except ValueError:  # not the main thread (tests)
+                pass
+        return saved
+
+    def _untrap(self, saved):
+        for s, h in saved.items():
+            signal.signal(s, h)
+
+    def _keep_awake(self):
+        exe = shutil.which("caffeinate") if self.keep_awake else None
+        if not exe:
+            return None
+        return subprocess.Popen([exe, "-i", "-w", str(os.getpid())])
