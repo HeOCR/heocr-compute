@@ -38,6 +38,10 @@ from .ssh import Remote, SSHError, public_key
 POD_PREFIX = "heocr-"
 POD_IN, POD_OUT, POD_EXIT = "/heocr/in", "/heocr/out", "/heocr/exit_code"
 POD_DEADMAN = "/heocr/deadman.sh"
+POD_STARTED = "/heocr/job.started"
+CREATE_TRIES = 4                  # a refused create (400 with no pod, 429, 5xx) is tried again, after a pause
+CREATE_PAUSES = (30, 60, 120)
+START_TRIES = 3                   # the job's start is idempotent, so a dropped SSH call is simply repeated
 READY_TIMEOUT = 20 * 60          # provisioning + image pull
 DEADMAN_GRACE = 15 * 60          # the pod removes itself this long after the wall-time limit
 PULL_RESERVE = 10 * 60           # wall time kept back for pulling results
@@ -267,7 +271,7 @@ class Runner:
         t0 = self.clock()
         try:
             env = {"PUBLIC_KEY": public_key(), "HEOCR_RUN_ID": run_id}
-            pod = self.api.create_pod(spec.profile.body(name, env))
+            pod = self._create(spec.profile.body(name, env), name)
             pod_id, t_created = pod["id"], self.clock()
             billed_rate = float(pod.get("cost") or 0) or q.compute_usd_per_hour
             rate = max(rate, billed_rate + budget.hourly(0, spec.profile.disk_gb))
@@ -311,6 +315,27 @@ class Runner:
                 caffeinate.terminate()
         return {"run_id": run_id, "pod_id": pod_id, "status": status, "error": error, "pulled": pulled,
                 "deadman": deadman, "self_removal": proof}
+
+    def _create(self, body: dict, name: str) -> dict:
+        """Create the pod. RunPod sometimes refuses a valid create (HTTP 400 with no capacity, 429, 5xx):
+        after checking by name that no pod was made, the same create is tried again after a pause."""
+        from .api import RunPodError
+        for attempt in range(CREATE_TRIES):
+            try:
+                return self.api.create_pod(body)
+            except (RunPodError, OSError) as e:
+                status = getattr(e, "status", None)
+                if status is not None and status not in (400, 429) and status < 500:
+                    raise
+                found = self._find_by_name(name)
+                if found:
+                    return self.api.get_pod(found) or {"id": found}
+                if attempt == CREATE_TRIES - 1:
+                    raise
+                pause = CREATE_PAUSES[min(attempt, len(CREATE_PAUSES) - 1)]
+                self.out(f"create refused ({e}); trying again in {pause}s")
+                self.sleep(pause)
+        raise RunFailed("unreachable")
 
     def _find_by_name(self, name: str) -> str | None:
         try:
@@ -377,8 +402,21 @@ class Runner:
     def _run_job(self, remote, spec, deadline: float) -> str:
         secs = int(max(60, min(self._job_seconds(spec), deadline - self.clock() - PULL_RESERVE)))
         inner = f"timeout --signal=TERM --kill-after=120 {secs} bash -lc {shlex.quote(spec.cmd)} > {POD_OUT}/job.log 2>&1; echo $? > {POD_EXIT}"
-        remote.run(f"mkdir -p {POD_OUT} /heocr/work && cd /heocr && "
-                   f"nohup setsid bash -c {shlex.quote(inner)} > /dev/null 2>&1 < /dev/null &", timeout=60)
+        # Idempotent: the marker is written once, before the job starts, so repeating the call after a
+        # dropped connection never starts a second job.
+        start = (f"mkdir -p {POD_OUT} /heocr/work && cd /heocr && if [ ! -e {POD_STARTED} ]; then "
+                 f"date -u > {POD_STARTED} && nohup setsid bash -c {shlex.quote(inner)} > /dev/null 2>&1 < /dev/null & "
+                 f"fi; test -e {POD_STARTED} && echo started")
+        for attempt in range(START_TRIES):
+            try:
+                r = remote.run(start, timeout=60, check=False)
+                if "started" in (r.stdout or ""):
+                    break
+            except SSHError as e:
+                self.out(f"job start: {e}; trying again")
+            self.sleep(10)
+        else:
+            raise RunFailed(f"the job could not be started over SSH in {START_TRIES} tries")
         self.out(f"job started, limit {secs // 60} min")
         failures = 0
         while self.clock() < deadline:

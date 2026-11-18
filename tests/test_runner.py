@@ -92,6 +92,11 @@ class FakeRemote:
                 self.on_fire()
         elif command.startswith("sh /heocr/deadman.sh"):
             ok.stdout = self.deadman
+        elif "job.started" in command:
+            self.starts = getattr(self, "starts", 0) + 1
+            if self.starts <= getattr(self, "drop_starts", 0):
+                raise SSHError("ssh timed out after 60s")
+            ok.stdout = "started\n"
         elif command.startswith("cat /heocr/exit_code"):
             ok.stdout = self.exit_code
         elif "find . -type f" in command:
@@ -298,7 +303,7 @@ class RunnerTest(unittest.TestCase):
         self.assertGreater(self.ledger.month_to_date()["open_estimate"], 0)
         self.assertIn(res["pod_id"], self.api.pods)
 
-    def test_lost_create_response_still_terminates(self):
+    def test_lost_create_response_finds_the_pod(self):
         real = self.api.create_pod
 
         def create_then_fail(body):
@@ -306,9 +311,67 @@ class RunnerTest(unittest.TestCase):
             raise OSError("response lost")
         self.api.create_pod = create_then_fail
         res = self.make(FakeRemote(dict(OUT))).run(self.spec())
-        self.assertEqual(res["status"], "error")
+        self.assertEqual(res["status"], "ok", res)
+        self.assertEqual(len(self.api.created), 1)      # found by name, never created twice
         self.assertEqual(self.api.terminated, ["pod1"])
         self.assertEqual(self.api.pods, {})
+
+    def test_dropped_job_start_is_repeated(self):
+        remote = FakeRemote(dict(OUT))
+        remote.drop_starts = 1
+        res = self.make(remote).run(self.spec())
+        self.assertEqual(res["status"], "ok", res)
+        starts = [c for c in remote.commands if "job.started" in c]
+        self.assertEqual(len(starts), 2)
+        self.assertIn("if [ ! -e /heocr/job.started ]", starts[0])   # never a second job
+
+    def test_job_start_gives_up_after_tries(self):
+        remote = FakeRemote(dict(OUT))
+        remote.drop_starts = 99
+        res = self.make(remote).run(self.spec())
+        self.assertEqual(res["status"], "error")
+        self.assertIn("could not be started", res["error"])
+        self.assertEqual(self.api.terminated, [res["pod_id"]])
+
+    def test_refused_create_is_tried_again(self):
+        from heocr_compute.remote.api import RunPodError
+        real, calls = self.api.create_pod, []
+
+        def flaky(body):
+            calls.append(1)
+            if len(calls) <= 2:
+                raise RunPodError("POST /v2/pods: HTTP 400 no capacity", 400)
+            return real(body)
+        self.api.create_pod = flaky
+        res = self.make(FakeRemote(dict(OUT))).run(self.spec())
+        self.assertEqual(res["status"], "ok", res)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(self.api.created), 1)
+
+    def test_refused_create_that_made_a_pod_uses_it(self):
+        from heocr_compute.remote.api import RunPodError
+        real = self.api.create_pod
+
+        def made_then_refused(body):
+            real(body)
+            raise RunPodError("POST /v2/pods: HTTP 500", 500)
+        self.api.create_pod = made_then_refused
+        res = self.make(FakeRemote(dict(OUT))).run(self.spec())
+        self.assertEqual(res["status"], "ok", res)
+        self.assertEqual(len(self.api.created), 1)
+        self.assertEqual(res["pod_id"], "pod1")
+
+    def test_auth_errors_are_not_retried(self):
+        from heocr_compute.remote.api import RunPodError
+        calls = []
+
+        def forbidden(body):
+            calls.append(1)
+            raise RunPodError("POST /v2/pods: HTTP 403", 403)
+        self.api.create_pod = forbidden
+        res = self.make(FakeRemote(dict(OUT))).run(self.spec())
+        self.assertEqual(res["status"], "error")
+        self.assertEqual(len(calls), 1)
 
     def test_pull_size_cap(self):
         res = self.make(FakeRemote(dict(OUT))).run(self.spec(max_pull_gb=1e-9))

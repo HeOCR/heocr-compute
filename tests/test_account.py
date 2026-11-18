@@ -99,6 +99,16 @@ class AccountCheckTest(unittest.TestCase):
                              {"email": "runner@example.org", "label": "heocr"})
 
 
+class ErrorDetailTest(unittest.TestCase):
+    def test_body_without_message_is_shown(self):
+        def transport(method, url, headers, body):
+            return 400, b'{"errors": [{"field": "cpu", "reason": "invented: no capacity"}]}'
+        with self.assertRaises(RunPodError) as cm:
+            RunPod("invented-key", transport=transport, sleep=lambda s: None).create_pod({})
+        self.assertIn("invented: no capacity", str(cm.exception))
+        self.assertNotIn("invented-key", str(cm.exception))
+
+
 class PerAccountLedgerTest(unittest.TestCase):
     def test_only_this_accounts_runs_count(self):
         now = dt.datetime(2026, 11, 18, 15, 0, tzinfo=dt.timezone.utc)
