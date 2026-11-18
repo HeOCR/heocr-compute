@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.DS_Store
+# run state never lives in the repository; it is under ~/.config/heocr/remote/
+spend.jsonl
+*.lock
+results/
