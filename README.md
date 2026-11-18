@@ -40,7 +40,7 @@ heocr-remote manifest ~/heocr-remote/open/synthetic/r10 -o r10.json   # every fi
 heocr-remote run --profile cpu --manifest r10.json --cmd 'bash in/train.sh' --hours 10
 ```
 
-On the pod, the inputs are in `/heocr/in`. The job runs in `/heocr`, under `timeout`. It writes what should come back to `/heocr/out`, and anything else, such as intermediate checkpoints and scratch files, to `/heocr/work`. Its output goes to `/heocr/out/job.log`.
+On the pod, the inputs are in `/heocr/in`. The job runs in `/heocr`, under `timeout`. The runner writes `/heocr/out/pod.json` (run id, pod id, pod type, hourly price) first, so the results name their machine. The job writes what should come back to `/heocr/out`, and anything else, such as intermediate checkpoints and scratch files, to `/heocr/work`. Its output goes to `/heocr/out/job.log`.
 
 `run` goes through these steps, and stops at the first that fails:
 
