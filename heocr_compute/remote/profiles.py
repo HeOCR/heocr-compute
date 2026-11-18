@@ -46,6 +46,15 @@ class Profile:
             b["gpu"] = {"id": self.gpu_id, "count": self.gpu_count}
         return b
 
+    def sized(self, flavor: str | None = None, vcpus: int | None = None) -> "Profile":
+        """The same CPU profile on another flavour or vCPU count (checked against the live catalogue
+        when priced). Used when the default size has no capacity."""
+        if self.kind != "cpu":
+            raise ValueError("--cpu-flavor and --vcpus apply to CPU profiles only")
+        if vcpus is not None and (vcpus < 2 or vcpus & (vcpus - 1)):
+            raise ValueError(f"--vcpus must be a power of two, at least 2, not {vcpus}")
+        return replace(self, cpu_flavor=flavor or self.cpu_flavor, vcpus=vcpus or self.vcpus)
+
     def community(self) -> "Profile":
         if self.kind != "gpu":
             raise ValueError("CPU pods run on the secure cloud only")
