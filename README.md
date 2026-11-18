@@ -13,7 +13,7 @@ pip install .
 heocr-remote profiles
 heocr-remote quote --profile cpu                 # live price, worst case, the caps' verdict; spends nothing
 heocr-remote smoke --dry-run                     # the whole check, no pod
-heocr-remote smoke                               # the smallest real run, at most $0.50 (about $0.05)
+heocr-remote smoke                               # the smallest real run, at most $0.50; also proves the pod can remove itself
 heocr-remote spend                               # month to date
 heocr-remote sweep --dry-run                     # orphaned heocr pods
 ```
@@ -54,7 +54,7 @@ On the pod, the inputs are in `/heocr/in`. The job runs in `/heocr`, under `time
 4. **Pod.** Create it, then:
    - terminate it at once if it is billed more than 5% above the quote;
    - wait for SSH;
-   - arm a dead-man's switch on the pod: after the wall-time limit plus 15 minutes, the pod removes itself, even if this machine slept or lost its network. If the image offers no way to do that, the run says so, and the sweeper is the only backstop.
+   - arm a dead-man's switch on the pod: after the wall-time limit plus 15 minutes, the pod removes itself with `runpodctl` and RunPod's pod-scoped key, even if this machine slept or lost its network. An SSH session does not inherit the container's environment, so the switch reads the pod id and key from the container's first process. If either is missing, or the image has no `runpodctl`, the run says which, and the sweeper is the only backstop.
 5. **Upload** the manifest's files as one tar stream over SSH. On the pod, `sha256sum -c` checks every hash.
 6. **Job.** Start it detached on the pod and poll for its exit code with short SSH calls, so a dropped connection doesn't end it. At the wall-time limit it ends as `timeout`.
 7. **Results.** Pull back what the job left in `out/`, which must be checkpoints, logs and scores only. By suffix:
@@ -105,7 +105,9 @@ Only open training inputs go to a pod: synthetic lists, htext and public-domain 
 
 Hours are measured from pod creation to confirmed termination, and dollars are rounded up to the started minute.
 
-Month to date (UTC months) counts every final, plus the worst case of every reservation without one. So a runner that died mid-run can only overstate the month, never understate it. `heocr-remote spend` prints it, run by run.
+Month to date (UTC months) counts every final, plus the worst case of every reservation without one. So a runner that died mid-run can only overstate the month, never understate it. `heocr-remote spend` prints it against the $150 cap, run by run.
+
+**The ledger counts only this runner's spend.** The monthly cap applies to runs started with `heocr-remote`. If the RunPod account is shared with other projects, their pods are not in the ledger and do not count towards the cap. On a shared account, the balance check before each run is the only guard: a run is refused when its worst case is more than the balance left. Keep the balance at what HeOCR may spend, or give HeOCR its own account.
 
 ## The sweeper
 
