@@ -41,7 +41,7 @@ POD_DEADMAN = "/heocr/deadman.sh"
 POD_STARTED = "/heocr/job.started"
 CREATE_TRIES = 4                  # a refused create (400 with no pod, 429, 5xx) is tried again, after a pause
 CREATE_PAUSES = (30, 60, 120)
-START_TRIES = 3                   # the job's start is idempotent, so a dropped SSH call is simply repeated
+START_TRIES = 5                   # the job's start is idempotent, so a dropped SSH call is simply repeated
 READY_TIMEOUT = 20 * 60          # provisioning + image pull
 DEADMAN_GRACE = 15 * 60          # the pod removes itself this long after the wall-time limit
 PULL_RESERVE = 10 * 60           # wall time kept back for pulling results
@@ -413,8 +413,10 @@ class Runner:
         inner = f"timeout --signal=TERM --kill-after=120 {secs} bash -lc {shlex.quote(spec.cmd)} > {POD_OUT}/job.log 2>&1; echo $? > {POD_EXIT}"
         # Idempotent: the marker is written once, before the job starts, so repeating the call after a
         # dropped connection never starts a second job.
+        # The whole backgrounded group has its streams redirected, so nothing keeps the SSH channel open:
+        # "a && b > /dev/null &" would background a subshell that holds SSH's stdout and waits for the job.
         start = (f"mkdir -p {POD_OUT} /heocr/work && cd /heocr && if [ ! -e {POD_STARTED} ]; then "
-                 f"date -u > {POD_STARTED} && nohup setsid bash -c {shlex.quote(inner)} > /dev/null 2>&1 < /dev/null & "
+                 f"date -u > {POD_STARTED}; ( exec setsid bash -c {shlex.quote(inner)} ) > /dev/null 2>&1 < /dev/null & "
                  f"fi; test -e {POD_STARTED} && echo started")
         for attempt in range(START_TRIES):
             try:
