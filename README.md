@@ -6,7 +6,7 @@ HeOCR's tooling for running open-data training and engine jobs on rented machine
 
 Every pod is terminated at the end, whether the job succeeded or failed.
 
-Standard library only; Python 3.11 or later.
+Python 3.11 or later. The core runner uses the standard library. The optional line-render publisher uses the Hugging Face Hub client.
 
 ```sh
 pip install .
@@ -68,7 +68,11 @@ On the pod, the inputs are in `/heocr/in`. The job runs in `/heocr`, under `time
    Every file's sha256 is compared with the pod's. A mismatch is fetched once more, then the run fails. The hashes are written to `SHA256SUMS` next to the results, in `~/heocr-remote/results/RUN_ID` by default.
 8. **Terminate** the pod, on success, error, wall-time limit or Ctrl-C (SIGINT, SIGTERM and SIGHUP are trapped), and confirm it is gone. Write the ledger's final record. If termination can't be confirmed, the run says so loudly, and its reservation stays open in the ledger.
 
-Without `--yes`, `run` asks before creating the pod. `--dry-run` does steps 1–3 against the live price and balance, and shows the pod it would create. While a run is active on macOS, `caffeinate` keeps the machine from idle sleep.
+Without `--yes`, `run` asks before creating the pod. `--dry-run` does steps 1–3 against the live price and balance, lists orphans without terminating them, and shows the pod it would create. While a run is active on macOS, `caffeinate` keeps the machine from idle sleep.
+
+## CPU line rendering
+
+Use the [bounded line-render template](docs/line-render-pilot.md) to render pinned open training text on a CPU pod and publish the verified artifacts to an existing private HeOCR dataset. The HF credential stays on the machine running `heocr-remote`.
 
 ## What may be sent
 

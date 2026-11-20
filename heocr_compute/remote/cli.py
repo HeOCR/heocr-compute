@@ -100,6 +100,12 @@ def cmd_run(a):
     return _report(Runner(*_connect()).run(spec))
 
 
+def cmd_render(a):
+    from .render import launch
+
+    return _report(launch(a, _connect))
+
+
 def cmd_smoke(a):
     work = Path(tempfile.mkdtemp(prefix="smoke-", dir=state_dir()))
     (work / "input.txt").write_text(SMOKE_INPUT, encoding="utf-8")
@@ -206,6 +212,24 @@ def main(argv=None) -> int:
     r.add_argument("--max-upload-gb", type=float, default=20.0)
     run_flags(r)
     r.set_defaults(fn=cmd_run)
+
+    from . import render
+
+    line = sub.add_parser("render-lines", help="bounded CPU render from pinned public inputs to a private HF dataset")
+    line.set_defaults(fn=cmd_render)
+    line.add_argument("--hours", type=float, default=render.MAX_HOURS, help="pod wall limit, at most 4 h")
+    line.add_argument("--run-cap", type=float, default=render.MAX_COST, help="run cap in USD, at most 1")
+    line.add_argument("--month-cap", type=float, default=budget.MONTH_CAP_USD)
+    line.add_argument("--dry-run", action="store_true", help="perform preflight and quote without any remote writes")
+    line.add_argument("--yes", action="store_true", help="do not prompt to create the pod")
+    line.add_argument("--results", help="directory for local transit and receipts")
+    line.add_argument("--count", type=int, required=True)
+    line.add_argument("--seed", type=int, required=True)
+    line.add_argument("--mode", help="pass a mode to a pinned hocrsyngen revision that supports it")
+    line.add_argument("--font", action="append", help="governed font ID, repeatable")
+    line.add_argument("--code-revision", default=render.CODE, help="full public hocrsyngen commit SHA")
+    line.add_argument("--font-manifest-sha256", default=render.FONT_SHA)
+    line.add_argument("--dataset", required=True, help="existing private HeOCR HF dataset")
 
     s = sub.add_parser("smoke", help=f"the smallest end-to-end run (capped at ${SMOKE_CAP_USD:.2f})")
     run_flags(s)
