@@ -10,7 +10,10 @@ import os
 import shlex
 import subprocess
 import tarfile
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+from threading import Timer
 
 KEY = "~/.config/heocr/remote/ssh/id_ed25519"
 
@@ -31,6 +34,36 @@ def public_key(key: str = KEY) -> str:
 
 class SSHError(Exception):
     pass
+
+
+@contextmanager
+def _tar_process(argv, timeout, *, stdin=None, stdout=None):
+    """Bound the whole transfer, including blocked reads, writes and tar processing."""
+    with tempfile.TemporaryFile() as stderr, subprocess.Popen(
+        argv, stdin=stdin, stdout=stdout, stderr=stderr,
+    ) as process:
+        expired = False
+
+        def abort():
+            nonlocal expired
+            expired = True
+            process.kill()
+
+        timer = Timer(timeout, abort)
+        timer.start()
+        try:
+            yield process
+            if process.wait() != 0 and not expired:
+                stderr.seek(max(0, stderr.seek(0, os.SEEK_END) - 300))
+                raise SSHError(f"tar transfer failed: {stderr.read().decode(errors='replace').strip()}")
+        finally:
+            timer.cancel()
+            timer.join()
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            if expired:
+                raise SSHError(f"tar transfer timed out after {timeout:.0f}s") from None
 
 
 class Remote:
@@ -64,8 +97,7 @@ class Remote:
         """Send ``rels`` (relative to ``root``) as one tar stream, unpacked under ``dest`` on the pod."""
         root = Path(root).expanduser()
         cmd = f"mkdir -p {shlex.quote(dest)} && tar -xf - --no-same-owner -C {shlex.quote(dest)}"
-        p = subprocess.Popen(self.argv(cmd), stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-        try:
+        with _tar_process(self.argv(cmd), timeout, stdin=subprocess.PIPE) as p:
             with tarfile.open(fileobj=p.stdin, mode="w|", format=tarfile.PAX_FORMAT) as tf:
                 for rel in rels:
                     info = tf.gettarinfo(str(root / rel), arcname=rel)
@@ -74,42 +106,25 @@ class Remote:
                     with open(root / rel, "rb") as f:
                         tf.addfile(info, f)
             p.stdin.close()
-            err = p.stderr.read().decode(errors="replace")
-            if p.wait(timeout=timeout) != 0:
-                raise SSHError(f"upload failed: {err.strip()[-300:]}")
-        finally:
-            if p.poll() is None:
-                p.kill()
-                p.wait()
-            for stream in (p.stdin, p.stdout, p.stderr):
-                if stream:
-                    stream.close()
 
-    def download(self, src: str, rels, dest, timeout: float = 6 * 3600) -> list[str]:
+    def download(self, src: str, rels, dest, timeout: float = 6 * 3600, max_bytes: int | None = None) -> list[str]:
         """Fetch ``rels`` (relative to ``src`` on the pod) into ``dest``. Only regular files in ``rels``."""
         wanted = set(rels)
         dest = Path(dest)
         dest.mkdir(parents=True, exist_ok=True)
         cmd = f"cd {shlex.quote(src)} && tar -cf - -- " + " ".join(shlex.quote(r) for r in sorted(wanted))
-        p = subprocess.Popen(self.argv(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         got = []
-        try:
+        with _tar_process(self.argv(cmd), timeout, stdout=subprocess.PIPE) as p:
             with tarfile.open(fileobj=p.stdout, mode="r|") as tf:
                 for m in tf:
                     name = m.name[2:] if m.name.startswith("./") else m.name
                     if not m.isfile() or name not in wanted:
                         continue
+                    if max_bytes is not None:
+                        max_bytes -= m.size
+                        if max_bytes < 0 or name in got:
+                            raise SSHError("tar transfer exceeded the verified size or repeated a file")
                     m.name = name
                     tf.extract(m, dest, filter="data")
                     got.append(name)
-            err = p.stderr.read().decode(errors="replace")
-            if p.wait(timeout=timeout) != 0:
-                raise SSHError(f"download failed: {err.strip()[-300:]}")
-        finally:
-            if p.poll() is None:
-                p.kill()
-                p.wait()
-            for stream in (p.stdin, p.stdout, p.stderr):
-                if stream:
-                    stream.close()
         return got

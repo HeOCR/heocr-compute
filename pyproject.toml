@@ -11,6 +11,9 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "HeOCR maintainers" }]
 dependencies = []
 
+[project.optional-dependencies]
+render = ["huggingface_hub>=0.33.4,<3"]
+
 [project.scripts]
 heocr-remote = "heocr_compute.remote.cli:main"
 

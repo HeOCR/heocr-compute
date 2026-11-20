@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from heocr_compute.remote.ssh import Remote
+from heocr_compute.remote.ssh import Remote, SSHError
 
 
 class LocalRemote(Remote):
@@ -37,6 +37,22 @@ class TarStreamTest(unittest.TestCase):
     def test_command_runs(self):
         p = LocalRemote("unused", 22).run("echo " + shlex.quote("hello"))
         self.assertEqual(p.stdout.strip(), "hello")
+
+    def test_download_deadline_covers_a_blocked_tar_read(self):
+        class SilentRemote(LocalRemote):
+            def argv(self, command):
+                return ["sleep", "2"]
+
+        with tempfile.TemporaryDirectory() as d, self.assertRaisesRegex(SSHError, "timed out"):
+            SilentRemote("unused", 22).download("unused", ["archive.tar"], d, timeout=0.05)
+
+    def test_download_enforces_member_size_before_extracting(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "archive.tar").write_bytes(b"too much")
+            with self.assertRaisesRegex(SSHError, "exceeded the verified size"):
+                LocalRemote("unused", 22).download(str(root), ["archive.tar"], root / "out", max_bytes=1)
+            self.assertFalse((root / "out" / "archive.tar").exists())
 
 
 if __name__ == "__main__":

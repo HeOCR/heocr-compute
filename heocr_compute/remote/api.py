@@ -51,6 +51,20 @@ def load_key(env=None) -> str:
     return key
 
 
+def load_hf_token(env=None) -> str:
+    """The optional Hub credential uses the same local secret file as the RunPod key."""
+    path = _config_path(env, CONFIG_ENV, CONFIG)
+    try:
+        if not path.is_file() or path.stat().st_mode & 0o077:
+            raise RunPodError("the runner secret file must be private (mode 600) for HF publishing")
+        token = tomllib.loads(path.read_text(encoding="utf-8")).get("hf_token")
+    except (OSError, ValueError):
+        raise RunPodError("could not read the runner secret file for HF publishing") from None
+    if not isinstance(token, str) or not token.startswith("hf_") or not token[3:].isalnum():
+        raise RunPodError("set hf_token in the runner secret file for HF publishing")
+    return token
+
+
 def load_account(env=None) -> dict:
     path = _config_path(env, ACCOUNT_ENV, ACCOUNT)
     if not path.is_file():

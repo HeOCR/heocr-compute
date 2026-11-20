@@ -38,7 +38,7 @@ class DetachedStartTest(unittest.TestCase):
             shell = LocalShell(Path(d))
             r = runner.Runner(api=None, ledger=None, out=lambda *a: None, sleep=lambda s: None,
                               clock=iter([0.0] + [1.0] * 10 + [10**9] * 10).__next__, poll_seconds=0)
-            spec = mock.Mock(cmd="sleep 20", hours=1)
+            spec = mock.Mock(cmd="sleep 20", hours=1, render_bundle=False)
             t0 = time.monotonic()
             status = r._run_job(shell, spec, deadline=10**8)
             self.assertLess(time.monotonic() - t0, 10, "the start call waited for the job")
