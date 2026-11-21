@@ -20,12 +20,14 @@ RUN python -m venv /opt/heocr-venv \
     && /opt/heocr-venv/bin/pip install /build 'huggingface_hub==0.36.2' \
     && /opt/heocr-venv/bin/pip check
 
-FROM base AS runtime
+FROM base AS pod-runtime
 COPY --from=pod-tools /usr/local/bin/runpodctl /usr/local/bin/runpodctl
 COPY --from=pod-tools /opt/heocr-venv /opt/heocr-venv
 COPY docker/hf-train-entrypoint.sh /opt/heocr-hf-entrypoint.sh
-COPY docker/comparators/entrypoint.sh /opt/comparators/entrypoint.sh
 COPY docker/comparators/NOTICE /usr/share/doc/heocr-comparator/NOTICE
+
+FROM pod-runtime AS runtime
+COPY docker/comparators/entrypoint.sh /opt/comparators/entrypoint.sh
 
 FROM base AS tesseract-build
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -65,13 +67,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2
 COPY --from=paddle-build /opt/paddle /opt/paddle
 ENV PATH="/opt/paddle/bin:$PATH"
 
-FROM runtime AS kraken
-LABEL org.opencontainers.image.description="Kraken comparator runtime. Contains non-open-source but redistributable components."
+FROM pod-runtime AS kraken-runtime
 COPY docker/comparators/licenses/Intel-Simplified-Software-License.pdf /usr/share/doc/heocr-comparator/
-COPY comparators/kraken_runner.py comparators/raw_output.py comparators/requirements-kraken-linux-amd64.txt ./
+COPY comparators/requirements-kraken-linux-amd64.txt ./
 RUN python -m pip install --only-binary=:all: --extra-index-url https://download.pytorch.org/whl/cpu \
     -r requirements-kraken-linux-amd64.txt && python -m pip check
+
+FROM kraken-runtime AS kraken
+LABEL org.opencontainers.image.description="Kraken comparator runtime. Contains non-open-source but redistributable components."
+COPY docker/comparators/entrypoint.sh /opt/comparators/entrypoint.sh
+COPY comparators/kraken_runner.py comparators/raw_output.py ./
 ENTRYPOINT ["/bin/sh", "/opt/comparators/entrypoint.sh", "/opt/comparators/kraken_runner.py"]
+
+FROM kraken-runtime AS kraken-train
+LABEL org.opencontainers.image.description="Autonomous Kraken CPU training worker. Contains redistributable oneMKL."
+ENV HEOCR_HF_REQUIRE_REPO_SCOPE=1
+ENTRYPOINT ["/bin/sh", "/opt/heocr-hf-entrypoint.sh"]
 
 FROM adapter AS trocr
 LABEL org.opencontainers.image.description="TrOCR comparator runtime. Contains non-open-source but redistributable components."

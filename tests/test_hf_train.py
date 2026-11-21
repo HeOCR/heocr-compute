@@ -79,6 +79,63 @@ class HfTrainTest(unittest.TestCase):
         self.assertEqual(body["registry"], "registry-fixture")
         self.assertNotIn("registry-fixture", stdout.getvalue())
 
+    def test_kraken_launcher_requires_and_forwards_exact_dataset_scope(self):
+        dataset = "HeOCR/example-train"
+        self.job["image"] = hf_train.KRAKEN_TRAIN_IMAGE + "sha256:" + "2" * 64
+        self.job["inputs"][0]["repo"] = dataset
+        self.job["output"] = {"repo": dataset, "type": "dataset"}
+        self.write_job()
+        with self.assertRaisesRegex(ValueError, "--hf-repo-scope"):
+            hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger)
+        self.args.hf_repo_scope = "HeOCR/example-other"
+        with self.assertRaisesRegex(ValueError, "outside its approved Hub dataset scope"):
+            hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger)
+        self.args.hf_repo_scope = dataset
+        with self.assertRaisesRegex(ValueError, "CPU profile"):
+            hf_train.launch(self.args, profiles.PROFILES["gpu"], self.api, self.ledger)
+        self.assertEqual(self.api.mock_calls, [])
+        self.assertEqual(self.ledger.events(), [])
+        with patch.object(Policy, "load", return_value=Policy()), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger), 0)
+        body, = self.api.create_pod.call_args.args
+        self.assertEqual(body["env"]["HEOCR_HF_REPO_SCOPE"], dataset)
+
+    def test_worker_checks_scope_before_hub_access(self):
+        dataset = "HeOCR/example-train"
+        self.job["inputs"][0]["repo"] = dataset
+        self.job["output"] = {"repo": dataset, "type": "dataset"}
+        cases = (
+            (None, "dataset", 1), ("HeOCR/example-other", "dataset", 1),
+            (dataset, "model", 1), (dataset, "dataset", 0),
+        )
+        for scope, input_type, status in cases:
+            with self.subTest(scope=scope, input_type=input_type):
+                self.job["inputs"][0]["type"] = input_type
+                self.write_job()
+                env = {
+                    "HEOCR_HF_REQUIRE_REPO_SCOPE": "1",
+                    "HEOCR_HF_JOB": self.jobfile.read_text(),
+                    "HEOCR_HF_JOB_SHA256": self.args.approved_sha256,
+                    "HEOCR_HF_RUN_ID": "20990101-000000-abcd",
+                    "RUNPOD_POD_ID": "pod-example",
+                    "HEOCR_HF_TOKEN": "hf_fixture",
+                }
+                if scope is not None:
+                    env["HEOCR_HF_REPO_SCOPE"] = scope
+                with (
+                    patch.dict(os.environ, env, clear=True),
+                    patch.object(os, "umask"),
+                    patch.object(hf_train_pod, "Path", return_value=self.root / "pod"),
+                    patch.object(hf_train_pod, "train", return_value="ok"),
+                    patch.object(hf_job, "Hub") as hub,
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(hf_train_pod.main(), status)
+                if status:
+                    hub.assert_not_called()
+                else:
+                    hub.assert_called_once()
+
     def test_dry_run_creates_nothing_and_denylist_blocks(self):
         self.args.dry_run = True
         with patch.object(Policy, "load", return_value=Policy()), contextlib.redirect_stdout(io.StringIO()):
