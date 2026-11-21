@@ -13,10 +13,9 @@ from types import SimpleNamespace
 from . import budget, hf_job
 from .api import RunPodError, load_hf_token
 from .policy import Policy, Refused
-from .runner import (Runner, new_run_id, observe_startup, pod_name, reconcile_startup_cost, record_startup,
-                     terminate_confirmed)
+from .runner import (HF_PROFILE_MARKER, Runner, new_run_id, observe_startup, pod_name, reconcile_startup_cost,
+                     record_startup, terminate_confirmed)
 
-PROFILE_MARKER = "hf"
 KRAKEN_TRAIN_IMAGE = "ghcr.io/heocr/heocr-compute-kraken-train@"
 STARTUP_POLL_SECONDS = 10
 
@@ -87,7 +86,7 @@ def launch(a, profile, api, ledger):
 
     runner = Runner(api, ledger)
     run_id = new_run_id(runner.now())
-    name = pod_name(PROFILE_MARKER, run_id)
+    name = pod_name(HF_PROFILE_MARKER, run_id)
     spec = SimpleNamespace(profile=profile, hours=a.hours, run_cap=a.run_cap, month_cap=a.month_cap)
     with ledger.locked():
         quote = runner.price(spec, ledger.month_to_date()["total"])
@@ -100,11 +99,12 @@ def launch(a, profile, api, ledger):
             return 0
         if not a.yes and input(f"Start {profile.pod_type}, worst case USD {quote.usd_est:.2f}? [y/N] ").lower().strip() != "y":
             return 0
+        runner.require_cpu_capacity(profile)
         reserved = runner.now()
         deadline = reserved + dt.timedelta(hours=a.hours)
         startup_deadline = min(deadline, reserved + dt.timedelta(minutes=startup_minutes))
-        ledger.reserve(run_id, profile=profile.name, pod_type=profile.pod_type, usd_est=quote.usd_est,
-                       hours_max=quote.hours, deadman_utc=deadline.isoformat(),
+        ledger.reserve(run_id, profile=profile.name, pod_type=profile.pod_type, vcpus=profile.vcpus,
+                       usd_est=quote.usd_est, hours_max=quote.hours, deadman_utc=deadline.isoformat(),
                        startup_deadline_utc=startup_deadline.isoformat(), autonomous=True,
                        output=job["output"], job_sha256=a.approved_sha256, clean_sha256=job["clean_sha256"],
                        snapshots=job["snapshots"])
@@ -190,7 +190,7 @@ def collect(a, api, ledger):
     pod_record = run.get("pod", {})
     pod_id = pod_record.get("pod_id")
     if not pod_id:
-        name = pod_name(PROFILE_MARKER, run_id)
+        name = pod_name(HF_PROFILE_MARKER, run_id)
         live = [x for x in api.list_pods() if x.get("name") == name]
         if live:
             print(f"Run {run_id} still has a pod; collect after teardown.")

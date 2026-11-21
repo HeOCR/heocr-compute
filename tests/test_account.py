@@ -155,6 +155,28 @@ class PodStartupTelemetryTest(unittest.TestCase):
                     client.pod_startup_state("example")
 
 
+class PodListTest(unittest.TestCase):
+    def test_admission_listing_follows_pages_and_includes_cluster_pods(self):
+        replies = [
+            {"pods": [{"id": "example1"}], "pagination": {"hasNextPage": True, "nextCursor": "example-page"}},
+            {"pods": [{"id": "example2"}], "pagination": {"hasNextPage": False, "nextCursor": None}},
+        ]
+        transport = mock.Mock(side_effect=[(200, json.dumps(reply).encode()) for reply in replies])
+        pods = RunPod("invented-key", transport=transport).list_pods(include_cluster_pods=True)
+        self.assertEqual([pod["id"] for pod in pods], ["example1", "example2"])
+        urls = [call.args[1] for call in transport.call_args_list]
+        self.assertTrue(all("includeClusterPods=true" in url for url in urls))
+        self.assertIn("cursor=example-page", urls[1])
+
+    def test_incomplete_or_looping_pod_list_is_an_error(self):
+        for reply in ({"pagination": {"hasNextPage": False}}, {"pods": []},
+                      {"pods": [], "pagination": {"hasNextPage": True, "nextCursor": "repeat"}}):
+            with self.subTest(reply=reply):
+                transport = mock.Mock(return_value=(200, json.dumps(reply).encode()))
+                with self.assertRaisesRegex(RunPodError, "could not verify .*pod list"):
+                    RunPod("invented-key", transport=transport).list_pods()
+
+
 class PerAccountLedgerTest(unittest.TestCase):
     def test_only_this_accounts_runs_count(self):
         now = dt.datetime(2026, 11, 18, 15, 0, tzinfo=dt.timezone.utc)

@@ -221,16 +221,26 @@ class RunPod:
             pass
         raise RunPodError("could not verify pod startup telemetry") from None
 
-    def list_pods(self) -> list[dict]:
+    def list_pods(self, *, include_cluster_pods: bool = False) -> list[dict]:
         pods, cursor = [], None
+        seen_cursors = set()
         while True:
             q = {"limit": 1000, **({"cursor": cursor} if cursor else {})}
+            if include_cluster_pods:
+                q["includeClusterPods"] = "true"
             r = self._call("GET", "/v2/pods", query=q)
-            pods += r.get("pods", [])
-            page = r.get("pagination") or {}
-            if not page.get("hasNextPage"):
+            batch = r.get("pods") if isinstance(r, dict) else None
+            page = r.get("pagination") if isinstance(r, dict) else None
+            if (not isinstance(batch, list) or not all(isinstance(pod, dict) for pod in batch)
+                    or not isinstance(page, dict) or type(page.get("hasNextPage")) is not bool):
+                raise RunPodError("could not verify the RunPod pod list")
+            pods.extend(batch)
+            if not page["hasNextPage"]:
                 return pods
             cursor = page.get("nextCursor")
+            if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+                raise RunPodError("could not verify RunPod pod list pagination")
+            seen_cursors.add(cursor)
 
     def terminate(self, pod_id: str) -> None:
         try:

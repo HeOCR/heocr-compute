@@ -3,7 +3,7 @@
 1. Sweep orphaned heocr pods.
 2. Check the inputs: manifest hashes, open roots and the local denylist (policy.py), upload size.
 3. Check the money: live price and balance, the per-run and monthly caps (budget.py), under the ledger's
-   lock; reserve the worst case in the ledger.
+   lock; check CPU admission and reserve the worst case in the ledger.
 4. Create the pod, check its billed price against the quote, wait for SSH, arm a dead-man's switch on the
    pod (it removes itself after the wall-time limit plus a grace period, should this machine sleep or
    lose its network).
@@ -33,11 +33,12 @@ from pathlib import Path
 
 from . import budget, manifest, profiles, render_job
 from .api import RunPodError
-from .policy import Policy
 from .ledger import Ledger, utcnow
+from .policy import Policy, Refused
 from .ssh import Remote, SSHError, public_key
 
 POD_PREFIX = "heocr-"
+HF_PROFILE_MARKER = "hf"
 POD_IN, POD_OUT, POD_EXIT = "/heocr/in", "/heocr/out", "/heocr/exit_code"
 POD_DEADMAN = "/heocr/deadman.sh"
 POD_STARTED = "/heocr/job.started"
@@ -48,6 +49,7 @@ READY_TIMEOUT = 20 * 60          # provisioning + image pull
 DEADMAN_GRACE = 15 * 60          # the pod removes itself this long after the wall-time limit
 PULL_RESERVE = 10 * 60           # wall time kept back for pulling results
 LOCAL_FREE_MARGIN = 1 << 30      # keep 1 GB free on this machine after a pull
+CPU_ACCOUNT_VCPU_CAP = 64
 
 # The pod-side dead-man's switch. ``deadman.sh SECONDS`` arms it in the background; ``deadman.sh now``
 # fires it at once (the smoke run's proof). An SSH session does not inherit the container's environment,
@@ -135,6 +137,35 @@ def pod_name(profile: str, run_id: str) -> str:
 def run_id_of(name: str) -> str | None:
     m = re.fullmatch(rf"{POD_PREFIX}[a-z0-9]+-(\d{{8}}-\d{{6}}-[0-9a-f]{{4}})", name or "")
     return m.group(1) if m else None
+
+
+def _cpu_pod_vcpus(pod: dict) -> int:
+    status = pod.get("status")
+    if status in ("EXITED", "TERMINATED"):
+        return 0
+    if not isinstance(status, str) or not status:
+        raise Refused("CPU admission requires a verifiable RunPod pod status")
+    cpu = pod.get("cpu")
+    gpu = pod.get("gpu")
+    if cpu is None and isinstance(gpu, dict) and gpu:
+        return 0
+    count = cpu.get("vcpuCount") if isinstance(cpu, dict) else None
+    if gpu is not None or type(count) is not int or count < 1:
+        raise Refused("CPU admission requires a verifiable RunPod compute type and vCPU count")
+    return count
+
+
+def _reserved_cpu_vcpus(reserve: dict) -> int:
+    if "vcpus" in reserve:
+        count = reserve["vcpus"]
+        if count is None:
+            return 0
+        if type(count) is not int or count < 1:
+            raise Refused("CPU admission requires a valid local vCPU reservation")
+        return count
+    # Earlier ledgers stored the CPU flavour and size together, for example cpu3cx32.
+    legacy = re.fullmatch(r"cpu[\w-]+x([1-9]\d*)", reserve.get("pod_type") or "")
+    return int(legacy[1]) if legacy else 0
 
 
 def returnable(rel: str, pulls, pull_intermediate: bool) -> str | None:
@@ -312,6 +343,48 @@ class Runner:
                             balance=self.api.balance(), month_spent=month_spent,
                             run_cap=spec.run_cap, month_cap=spec.month_cap)
 
+    def require_cpu_capacity(self, profile: profiles.Profile) -> None:
+        """Check admission under the ledger lock, immediately before reserving."""
+        if profile.kind != "cpu":
+            return
+        runs = self.ledger.runs()
+        listed, names = {}, set()
+        for pod in self.api.list_pods(include_cluster_pods=True):
+            pid, name = pod.get("id"), pod.get("name")
+            if not isinstance(pid, str) or not pid or not isinstance(name, str) or not name:
+                raise Refused("CPU admission requires a verifiable RunPod pod identity")
+            listed[pid] = max(listed.get(pid, 0), _cpu_pod_vcpus(pod))
+            names.add(name)
+
+        pending = 0
+        for run_id, run in runs.items():
+            reserve = run.get("reserve") or {}
+            if "final" in run or reserve.get("account") != self.ledger.account:
+                continue
+            count = _reserved_cpu_vcpus(reserve)
+            if not count:
+                continue
+            pid = run.get("pod", {}).get("pod_id")
+            if pid:
+                if pid in listed:
+                    continue
+                # An exact-ID read covers list lag and releases departed pods even if billing is pending.
+                pod = self.api.get_pod(pid)
+                if pod is not None:
+                    if not isinstance(pod, dict) or pod.get("id") != pid:
+                        raise Refused("CPU admission requires a verifiable RunPod pod identity")
+                    listed[pid] = _cpu_pod_vcpus(pod)
+                continue
+            marker = HF_PROFILE_MARKER if reserve.get("autonomous") else reserve["profile"]
+            if pod_name(marker, run_id) not in names:
+                pending += count
+
+        used = sum(listed.values())
+        free = max(0, CPU_ACCOUNT_VCPU_CAP - used - pending)
+        if profile.vcpus > free:
+            raise Refused(f"CPU admission refused: requested {profile.vcpus} vCPUs, {free} of "
+                          f"{CPU_ACCOUNT_VCPU_CAP} available ({used} in pods, {pending} in unconfirmed reservations)")
+
     # -- the run -----------------------------------------------------------------------------------
     def run(self, spec: Spec) -> dict:
         sweep(self.api, self.ledger, dry_run=spec.dry_run, out=self.out, sleep=self.sleep, now=self.now)
@@ -331,11 +404,12 @@ class Runner:
                 return {"run_id": run_id, "status": "dry_run", "quote": q.__dict__}
             if not spec.yes and self.confirm(f"start {spec.profile.pod_type}, worst case ${q.usd_est:.2f}? [y/N] ").strip().lower() != "y":
                 return {"run_id": run_id, "status": "declined"}
+            self.require_cpu_capacity(spec.profile)
             guard_seconds = 0 if spec.render_bundle else DEADMAN_GRACE + budget.STARTUP_HOURS * 3600
             deadman = self.now() + dt.timedelta(hours=spec.hours, seconds=guard_seconds)
             self.ledger.reserve(run_id, profile=spec.profile.name, pod_type=spec.profile.pod_type,
-                                usd_est=q.usd_est, hours_max=q.hours, host=socket.gethostname(),
-                                deadman_utc=deadman.isoformat(timespec="seconds"))
+                                vcpus=spec.profile.vcpus, usd_est=q.usd_est, hours_max=q.hours,
+                                host=socket.gethostname(), deadman_utc=deadman.isoformat(timespec="seconds"))
         return self._execute(spec, entries, run_id, name, q)
 
     def _job_seconds(self, spec: Spec) -> float:

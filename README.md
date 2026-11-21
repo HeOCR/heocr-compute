@@ -78,6 +78,8 @@ On the pod, the inputs are in `/heocr/in`. The job runs in `/heocr`, under `time
 
 Without `--yes`, `run` asks before creating the pod. `--dry-run` does steps 1–3 against the live price and balance, lists orphans without terminating them, and shows the pod it would create. While a run is active on macOS, `caffeinate` keeps the machine from idle sleep.
 
+Before reserving a CPU pod, `run`, `render` and `hf-train` check the 64-vCPU account ceiling. Provisioning CPU pods and unresolved local reservations count toward it. The ledger lock coordinates launches that share the same ledger. RunPod still decides whether it can accept the create, including when another machine launches at the same time. Dry runs quote without requiring free vCPUs. If admission reports an unconfirmed reservation, check the existing run and reconcile it before relying on those slots.
+
 ## CPU line rendering
 
 Use the [bounded line-render template](docs/line-render-pilot.md) to render pinned open training text on a CPU pod and publish the verified artifacts to an existing private HeOCR dataset. The HF credential stays on the machine running `heocr-remote`.
