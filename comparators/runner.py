@@ -11,7 +11,7 @@ import tempfile
 import urllib.request
 
 ASSETS = json.loads((Path(__file__).parent / "assets.json").read_text())
-MODELS = ("best", "fast", "rivok-full", "rivok-lite", "paddle")
+MODELS = ("best", "fast", "rivok-full", "rivok-lite", "paddle", "trocr-s44")
 
 
 def verify(path, expected):
@@ -24,7 +24,8 @@ def verify(path, expected):
 
 
 def selected(model):
-    return [a for name, a in ASSETS.items() if name == model or (model == "paddle" and name.startswith("paddle-"))]
+    return [asset for name, asset in ASSETS.items()
+            if name == model or asset["path"].startswith(f"{model}/")]
 
 
 def fetch(root, model):
@@ -47,8 +48,14 @@ def fetch(root, model):
 
 
 def run(root, model, image, mode):
+    if model == "trocr-s44" and mode != "line":
+        raise ValueError("trocr-s44 requires a pre-cropped line image")
     for asset in selected(model):
         verify(root / asset["path"], asset["sha256"])
+    if model == "trocr-s44":
+        from trocr import recognize_line
+
+        return recognize_line(root / model, image)
     if model == "paddle":
         from paddleocr_hebrew import HebrewOCR
         result = HebrewOCR.word(str(root / "paddle")).read(str(image), rec_mode="cascade")

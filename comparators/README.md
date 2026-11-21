@@ -71,6 +71,9 @@ remain in the record.
 [Kraken's small record](https://zenodo.org/records/21788405) declares Apache-2.0
 and lists `small.safetensors`; its title resolves a prior small/medium naming
 ambiguity, but this does not select the model or segmentation for a run. See [candidate Kraken and BiblIA runners](KRAKEN.md).
+See [Hebrew handwriting candidates](HTR.md) for the line-only TrOCR-style runner
+and additional discovery work.
+
 Additional language families require a specific eligible pretrained Hebrew reader,
 not just framework support. Stock [PaddleOCR multilingual recognition](https://www.paddleocr.ai/main/en/version3.x/algorithm/PP-OCRv5/PP-OCRv5_multi_languages.html)
 does not list Hebrew in the cited model list; Rivok's model is a separate reader.
