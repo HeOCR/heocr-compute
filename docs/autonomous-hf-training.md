@@ -64,7 +64,7 @@ Collection pins the current private output revision once, checks the run and job
 
 ## Deadline incident follow-up
 
-A long-running production job reached its recorded deadline without a verified
+A long training run reached its recorded deadline without a verified
 teardown or Hub receipt at the alarm. The subsequent account check found the
 pod gone, and the pinned private output still had no checkpoint or receipt.
 The deletion timestamp, actor and provider reason were unavailable. Those
