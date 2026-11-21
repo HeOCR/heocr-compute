@@ -194,8 +194,8 @@ def launch(a, connect) -> dict:
         manifest.dump(manifest.build(root, policy), listing)
         spec = Spec(profile, listing, root, COMMAND, a.hours, run_cap=a.run_cap,
                     month_cap=a.month_cap, results=result_base, dry_run=a.dry_run, yes=a.yes,
-                    policy=policy, render_bundle=True)
-        result = Runner(*connect(), out=print).run(spec)
+                    policy=policy, render_bundle=True, capacity_wait_hours=getattr(a, "capacity_wait_hours", None))
+        result = Runner(*connect()).run(spec)
     if result["status"] == "ok":
         dest = result_base / result["run_id"]
         url = publisher.publish(a.dataset, result["run_id"], dest, job)

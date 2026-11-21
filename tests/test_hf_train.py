@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from heocr_compute.remote import hf_job, hf_train, hf_train_pod, profiles
+from heocr_compute.remote import cli, hf_job, hf_train, hf_train_pod, profiles
 from heocr_compute.remote.api import RunPodError
 from heocr_compute.remote.ledger import Ledger
 from heocr_compute.remote.policy import Policy, Refused
@@ -223,6 +223,7 @@ class HfTrainTest(unittest.TestCase):
 
     def test_dry_run_creates_nothing_and_denylist_blocks(self):
         self.args.dry_run = True
+        self.args.capacity_wait_hours = 1
         with patch.object(Policy, "load", return_value=Policy()), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger), 0)
         self.api.create_pod.assert_not_called()
@@ -241,6 +242,52 @@ class HfTrainTest(unittest.TestCase):
             hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger)
         self.api.create_pod.assert_not_called()
         self.api.terminate.assert_not_called()
+        self.assertEqual(self.ledger.events(), [])
+
+    def test_autonomous_cli_waits_then_starts_pod_and_wall_clock(self):
+        before = dt.datetime(2099, 1, 1, tzinfo=dt.timezone.utc)
+        after = before + dt.timedelta(minutes=5)
+        elapsed = 0
+
+        def now():
+            return before + dt.timedelta(seconds=elapsed)
+
+        self.ledger.now = now
+        self.api.list_pods.side_effect = [
+            [{"id": "busy", "name": "busy", "status": "PROVISIONING", "cpu": {"vcpuCount": 64}}], [],
+        ]
+        runner = Runner(self.api, self.ledger, now=now, clock=lambda: elapsed)
+
+        def sleep(seconds):
+            nonlocal elapsed
+            self.assertEqual(seconds, 300)
+            self.assertEqual(self.ledger.events(), [])
+            self.api.create_pod.assert_not_called()
+            elapsed += seconds
+
+        runner.sleep = Mock(side_effect=sleep)
+        with patch.object(cli, "_connect", return_value=(self.api, self.ledger)), \
+                patch.object(hf_train, "Runner", return_value=runner), patch.object(Policy, "load", return_value=Policy()), \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc = cli.main(["hf-train", "--profile", "smoke", "--job", str(self.jobfile), "--yes",
+                           "--approved-sha256", self.args.approved_sha256, "--hf-secret", self.args.hf_secret,
+                           "--hours", "1", "--run-cap", "1", "--wait-for-capacity", "--max-wait", "1"])
+        self.assertEqual(rc, 0)
+        runner.sleep.assert_called_once_with(300)
+        self.api.create_pod.assert_called_once()
+        reserve = self.ledger.events()[0]
+        self.assertEqual(reserve["startup_deadline_utc"], (after + dt.timedelta(minutes=15)).isoformat())
+        self.assertEqual(reserve["deadman_utc"], (after + dt.timedelta(hours=1)).isoformat())
+
+    def test_wait_flag_still_fails_immediately_on_bad_pod_identity(self):
+        self.args.capacity_wait_hours = 1
+        self.api.list_pods.return_value = [{"status": "RUNNING", "cpu": {"vcpuCount": 32}}]
+        runner = Runner(self.api, self.ledger, sleep=Mock())
+        with patch.object(hf_train, "Runner", return_value=runner), patch.object(Policy, "load", return_value=Policy()), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(Refused, "verifiable RunPod pod identity"):
+            hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger)
+        runner.sleep.assert_not_called()
+        self.api.create_pod.assert_not_called()
         self.assertEqual(self.ledger.events(), [])
 
     def test_offline_runner_is_not_an_orphan(self):

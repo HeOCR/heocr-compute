@@ -28,7 +28,9 @@ import signal
 import socket
 import subprocess
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 from . import budget, manifest, profiles, render_job
@@ -50,6 +52,8 @@ DEADMAN_GRACE = 15 * 60          # the pod removes itself this long after the wa
 PULL_RESERVE = 10 * 60           # wall time kept back for pulling results
 LOCAL_FREE_MARGIN = 1 << 30      # keep 1 GB free on this machine after a pull
 CPU_ACCOUNT_VCPU_CAP = 64
+DEFAULT_CAPACITY_WAIT_HOURS = 6.0
+CAPACITY_POLL_SECONDS = 5 * 60
 
 # The pod-side dead-man's switch. ``deadman.sh SECONDS`` arms it in the background; ``deadman.sh now``
 # fires it at once (the smoke run's proof). An SSH session does not inherit the container's environment,
@@ -96,6 +100,10 @@ class DeadlineExceeded(RunFailed):
     pass
 
 
+class CpuCapacityUnavailable(Refused):
+    """Verified free capacity is below the requested CPU pod size."""
+
+
 def _remaining(clock, deadline: float | None, limit: float) -> float:
     if deadline is None:
         return limit
@@ -124,6 +132,7 @@ class Spec:
     policy: object = None     # policy.Policy; loaded from the local files when None
     prove_deadman: bool = False  # smoke only: fire the pod's switch at the end and check the pod is gone
     render_bundle: bool = False  # fixed render recipe only: bounded tar + its checksum manifest
+    capacity_wait_hours: float | None = None
 
 
 def new_run_id(now: dt.datetime) -> str:
@@ -145,10 +154,10 @@ def _cpu_pod_vcpus(pod: dict) -> int:
         return 0
     if not isinstance(status, str) or not status:
         raise Refused("CPU admission requires a verifiable RunPod pod status")
-    cpu = pod.get("cpu")
     gpu = pod.get("gpu")
-    if cpu is None and isinstance(gpu, dict) and gpu:
+    if isinstance(gpu, dict) and gpu:
         return 0
+    cpu = pod.get("cpu")
     count = cpu.get("vcpuCount") if isinstance(cpu, dict) else None
     if gpu is not None or type(count) is not int or count < 1:
         raise Refused("CPU admission requires a verifiable RunPod compute type and vCPU count")
@@ -319,7 +328,7 @@ def sweep(api, ledger: Ledger, *, everything: bool = False, dry_run: bool = Fals
 class Runner:
     api: object
     ledger: Ledger
-    out: object = print
+    out: object = partial(print, flush=True)
     sleep: object = time.sleep
     clock: object = time.monotonic
     now: object = utcnow
@@ -347,6 +356,8 @@ class Runner:
         """Check admission under the ledger lock, immediately before reserving."""
         if profile.kind != "cpu":
             return
+        if profile.vcpus > CPU_ACCOUNT_VCPU_CAP:
+            raise Refused(f"requested {profile.vcpus} vCPUs exceeds the {CPU_ACCOUNT_VCPU_CAP}-vCPU account limit")
         runs = self.ledger.runs()
         listed, names = {}, set()
         for pod in self.api.list_pods(include_cluster_pods=True):
@@ -382,8 +393,55 @@ class Runner:
         used = sum(listed.values())
         free = max(0, CPU_ACCOUNT_VCPU_CAP - used - pending)
         if profile.vcpus > free:
-            raise Refused(f"CPU admission refused: requested {profile.vcpus} vCPUs, {free} of "
-                          f"{CPU_ACCOUNT_VCPU_CAP} available ({used} in pods, {pending} in unconfirmed reservations)")
+            raise CpuCapacityUnavailable(f"CPU admission refused: requested {profile.vcpus} vCPUs, {free} of "
+                                         f"{CPU_ACCOUNT_VCPU_CAP} available ({used} in pods, "
+                                         f"{pending} in unconfirmed reservations)")
+
+    @contextmanager
+    def launch_slot(self, spec):
+        """Yield (quote, waited) with the lock held through reservation, or (None, False) on decline."""
+        wait_hours = spec.capacity_wait_hours
+        wait_seconds = None if wait_hours is None else wait_hours * 3600
+        if wait_seconds is not None and (not math.isfinite(wait_seconds) or wait_seconds <= 0):
+            raise ValueError("capacity wait must be a finite, positive number of hours")
+        deadline = approved_cost = None
+        while True:
+            with self.ledger.locked():
+                if deadline is not None and self.clock() >= deadline:
+                    break
+                quote = self.price(spec, self.ledger.month_to_date()["total"])
+                new_cost = approved_cost is None or quote.usd_est > approved_cost
+                if new_cost:
+                    for line in quote.lines():
+                        self.out(line)
+                budget.check(quote)
+                if new_cost:
+                    if not (spec.dry_run or spec.yes) and self.confirm(
+                            f"start {spec.profile.pod_type}, worst case ${quote.usd_est:.2f}? [y/N] ").strip().lower() != "y":
+                        yield None, False
+                        return
+                    approved_cost = quote.usd_est
+                if spec.dry_run:
+                    yield quote, False
+                    return
+                try:
+                    self.require_cpu_capacity(spec.profile)
+                except CpuCapacityUnavailable as error:
+                    if wait_seconds is None:
+                        raise
+                    shortage = str(error)
+                else:
+                    if deadline is not None and self.clock() >= deadline:
+                        break
+                    yield quote, deadline is not None
+                    return
+            if deadline is None:
+                deadline = self.clock() + wait_seconds
+            delay = min(CAPACITY_POLL_SECONDS, deadline - self.clock())
+            if delay > 0:
+                self.out(f"{shortage}. Waiting {delay:.0f}s for CPU capacity.")
+                self.sleep(delay)
+        raise Refused(f"capacity wait expired after {wait_hours:g} h ({shortage})")
 
     # -- the run -----------------------------------------------------------------------------------
     def run(self, spec: Spec) -> dict:
@@ -392,19 +450,16 @@ class Runner:
         self.out(f"inputs: {len(entries)} files, {size / (1 << 20):.1f} MB, hashes, open roots and local denylist checked")
         run_id = new_run_id(self.now())
         name = pod_name(spec.profile.name, run_id)
-        with self.ledger.locked():
-            q = self.price(spec, self.ledger.month_to_date()["total"])
-            for line in q.lines():
-                self.out(line)
-            budget.check(q)
+        with self.launch_slot(spec) as (q, waited):
+            if q is None:
+                return {"run_id": run_id, "status": "declined"}
             if spec.dry_run:
                 body = spec.profile.body(name, {"PUBLIC_KEY": "<heocr-remote ssh public key>"})
                 self.out("dry run: would create " + json.dumps(body))
                 self.out(f"dry run: would run under timeout {self._job_seconds(spec):.0f}s: {spec.cmd}")
                 return {"run_id": run_id, "status": "dry_run", "quote": q.__dict__}
-            if not spec.yes and self.confirm(f"start {spec.profile.pod_type}, worst case ${q.usd_est:.2f}? [y/N] ").strip().lower() != "y":
-                return {"run_id": run_id, "status": "declined"}
-            self.require_cpu_capacity(spec.profile)
+            if waited:
+                manifest.verify_local(entries, spec.root, spec.policy or Policy.load())
             guard_seconds = 0 if spec.render_bundle else DEADMAN_GRACE + budget.STARTUP_HOURS * 3600
             deadman = self.now() + dt.timedelta(hours=spec.hours, seconds=guard_seconds)
             self.ledger.reserve(run_id, profile=spec.profile.name, pod_type=spec.profile.pod_type,

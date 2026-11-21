@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import shutil
 import sys
 import tempfile
@@ -21,7 +22,7 @@ from . import budget, manifest, profiles
 from .api import RunPod, RunPodError, load_account, load_key
 from .policy import Policy, Refused
 from .ledger import Ledger, state_dir
-from .runner import RunFailed, Runner, Spec, sweep
+from .runner import DEFAULT_CAPACITY_WAIT_HOURS, RunFailed, Runner, Spec, sweep
 
 SMOKE_CAP_USD = 0.50
 SMOKE_INPUT = "A tiny invented input for the remote runner's smoke test.\nLine two of it.\n"
@@ -83,7 +84,7 @@ def _spec(a, p: profiles.Profile, manifest_path, root, cmd, run_cap) -> Spec:
                 pull_intermediate=getattr(a, "pull_intermediate", False),
                 results=Path(a.results).expanduser() if getattr(a, "results", None) else None,
                 max_pull_gb=getattr(a, "max_pull_gb", 2.0), max_upload_gb=getattr(a, "max_upload_gb", 20.0),
-                dry_run=a.dry_run, yes=a.yes)
+                dry_run=a.dry_run, yes=a.yes, capacity_wait_hours=getattr(a, "capacity_wait_hours", None))
 
 
 def _report(res) -> int:
@@ -187,6 +188,11 @@ def main(argv=None) -> int:
         p.add_argument("--month-cap", type=float, default=budget.MONTH_CAP_USD,
                        help="monthly cap in $ (default and maximum 150)")
 
+    def capacity_wait(p):
+        p.add_argument("--wait-for-capacity", action="store_true", help="wait for CPU account vCPUs to become free")
+        p.add_argument("--max-wait", type=float, metavar="HOURS",
+                       help=f"capacity wait limit in hours (default {DEFAULT_CAPACITY_WAIT_HOURS:g})")
+
     sub.add_parser("profiles").set_defaults(fn=cmd_profiles)
 
     q = sub.add_parser("quote", help="live price, worst case and the caps' verdict; spends nothing")
@@ -206,6 +212,7 @@ def main(argv=None) -> int:
 
     def run_flags(p):
         money(p)
+        capacity_wait(p)
         p.add_argument("--dry-run", action="store_true", help="check everything, create nothing")
         p.add_argument("--yes", action="store_true", help="do not ask before starting the pod")
         p.add_argument("--results", help="where results go (default ~/heocr-remote/results/RUN_ID)")
@@ -234,6 +241,7 @@ def main(argv=None) -> int:
     line.add_argument("--month-cap", type=float, default=budget.MONTH_CAP_USD)
     line.add_argument("--dry-run", action="store_true", help="perform preflight and quote without any remote writes")
     line.add_argument("--yes", action="store_true", help="do not prompt to create the pod")
+    capacity_wait(line)
     line.add_argument("--results", help="directory for local transit and receipts")
     line.add_argument("--count", type=int, required=True)
     line.add_argument("--seed", type=int, required=True)
@@ -260,6 +268,7 @@ def main(argv=None) -> int:
     train.add_argument("--month-cap", type=float, default=budget.MONTH_CAP_USD)
     train.add_argument("--dry-run", action="store_true")
     train.add_argument("--yes", action="store_true")
+    capacity_wait(train)
 
     collect = sub.add_parser("collect-hf", help="verify and collect an autonomous run after pod teardown")
     collect.set_defaults(fn=cmd_collect_hf)
@@ -284,6 +293,12 @@ def main(argv=None) -> int:
     sw.set_defaults(fn=cmd_sweep)
 
     a = ap.parse_args(argv)
+    if getattr(a, "wait_for_capacity", False):
+        a.capacity_wait_hours = DEFAULT_CAPACITY_WAIT_HOURS if a.max_wait is None else a.max_wait
+        if not math.isfinite(a.capacity_wait_hours * 3600) or a.capacity_wait_hours <= 0:
+            ap.error("--max-wait must be a finite, positive number of hours")
+    elif getattr(a, "max_wait", None) is not None:
+        ap.error("--max-wait requires --wait-for-capacity")
     try:
         return a.fn(a) or 0
     except (budget.BudgetRefused, Refused, manifest.ManifestError, RunFailed, RunPodError, ValueError) as e:
