@@ -35,10 +35,10 @@ The operator configures a Runpod managed secret containing a fine-grained Hub to
 
 ## Worker and launch
 
-Build the image with the repository Dockerfile and an approved digest-pinned Runpod base. The base must provide a working pod-scoped `runpodctl`. Use the resulting deployed digest in the job specification. For a trainer with additional dependencies, bake those into the reviewed worker before pinning it.
+Build the Linux AMD64 image with the repository Dockerfile. It defaults to a pinned Runpod base and installs the checksum-pinned official `runpodctl` binary. An approved replacement base can be passed by digest. The service supplies the pod-scoped credentials at startup. Use the resulting deployed digest in the job specification. For a trainer with additional dependencies, bake those into the reviewed worker before pinning it.
 
 ```sh
-docker build --platform linux/amd64 --build-arg BASE_IMAGE="$BASE_IMAGE" -f docker/hf-train.Dockerfile -t "$WORKER_TAG" .
+docker build --platform linux/amd64 -f docker/hf-train.Dockerfile -t "$WORKER_TAG" .
 heocr-remote hf-train --profile cpu --job "$JOB" --approved-sha256 "$JOB_SHA" \
   --hf-secret "$RUNPOD_HF_SECRET_NAME" --hours "$HOURS" --run-cap "$USD_CAP" --dry-run
 ```
