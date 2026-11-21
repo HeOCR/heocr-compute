@@ -58,3 +58,9 @@ heocr-remote collect-hf "$RUN_ID" --results "$PRIVATE_RESULTS"
 ```
 
 Collection pins the current private output revision once, checks the run and job IDs against the ledger, and verifies every returned snapshot's size and SHA-256 before exposing the result directory. Earlier committed snapshots can be collected after an incomplete run. If billing is delayed, collect again to reconcile it. The original estimate remains reserved until provider billing is available. The regular sweeper preserves autonomous pods before their recorded deadline even if the launcher is gone. It also preserves autonomous pods belonging to another launcher's ledger, unless explicitly invoked with `--all`.
+
+## Published worker
+
+The [Publish training worker workflow](../.github/workflows/publish-training-image.yml) builds the Linux AMD64 worker from main and publishes it as `ghcr.io/heocr/heocr-compute-train:sha-<commit>`. Its job output and summary give the image reference by digest for the job spec. The build context contains only the committed launcher code, package metadata and worker build files.
+
+GitHub gives the first package version private visibility. After the first push, a HeOCR package administrator sets `heocr-compute-train` to Public. The workflow uses the repository's automatic token for the push, then verifies an anonymous pull of the digest with a clean Docker configuration. Repeat that check after the one-time visibility change. [GitHub Container registry visibility](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)

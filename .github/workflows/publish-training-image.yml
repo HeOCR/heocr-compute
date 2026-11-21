@@ -1,0 +1,60 @@
+name: Publish training worker
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.repository == 'HeOCR/heocr-compute' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image: ${{ steps.build.outputs.image }}
+    env:
+      IMAGE: ghcr.io/heocr/heocr-compute-train
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Authenticate to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Build and publish Linux AMD64
+        id: build
+        run: |
+          context="$RUNNER_TEMP/training-image-context"
+          metadata="$RUNNER_TEMP/training-image-metadata.json"
+          mkdir "$context"
+          git archive "$GITHUB_SHA" pyproject.toml heocr_compute \
+            docker/hf-train.Dockerfile docker/hf-train-entrypoint.sh | tar -x -C "$context"
+          docker buildx build --platform linux/amd64 --file "$context/docker/hf-train.Dockerfile" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --tag "$IMAGE:sha-$GITHUB_SHA" --provenance=false --sbom=false \
+            --metadata-file "$metadata" --push "$context"
+          digest="$(jq -er '.["containerimage.digest"]' "$metadata")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'digest=%s\nimage=%s@%s\n' "$digest" "$IMAGE" "$digest" >> "$GITHUB_OUTPUT"
+          printf 'Training image: `%s@%s`\n\nSource revision: `%s`\n' \
+            "$IMAGE" "$digest" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify the digest is pullable without credentials
+        env:
+          PUBLISHED_IMAGE: ${{ steps.build.outputs.image }}
+        run: |
+          anonymous_config="$(mktemp -d)"
+          printf '{}\n' > "$anonymous_config/config.json"
+          if ! docker --config "$anonymous_config" pull --platform linux/amd64 "$PUBLISHED_IMAGE"; then
+            echo "::error::Anonymous pull failed. Check GHCR package visibility and make heocr-compute-train public if this is the first publish."
+            exit 1
+          fi
