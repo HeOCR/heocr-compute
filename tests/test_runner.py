@@ -1,4 +1,5 @@
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import tempfile
@@ -215,7 +216,8 @@ class RunnerTest(unittest.TestCase):
         self.ledger.reserve(run_id, profile="cpu", pod_type="cpu3cx32", usd_est=0.5, autonomous=True)
         self.ledger.reserve("other", account="other", profile="cpu", vcpus=32, usd_est=0.5)
         self.api.pods["busy"] = {"id": "busy", "name": "busy", "status": "RUNNING", "cpu": {"vcpuCount": 32}}
-        self.api.pods["gpu"] = {"id": "gpu", "name": "gpu", "status": "STARTING", "gpu": {"vcpuCount": 32}}
+        self.api.pods["gpu"] = {"id": "gpu", "name": "gpu", "status": "RUNNING", "gpu": {"vcpuCount": 32},
+                                "cpu": {"vcpuCount": 32}}
         self.api.pods["stopped"] = {"id": "stopped", "name": "stopped", "status": "EXITED"}
         runner = self.make(None)
         with self.ledger.locked(), self.assertRaisesRegex(Refused, "32 in pods, 32 in unconfirmed reservations"):
@@ -247,6 +249,68 @@ class RunnerTest(unittest.TestCase):
             runner.require_cpu_capacity(profiles.PROFILES["gpu"])
             with self.assertRaisesRegex(Refused, "verifiable RunPod compute type and vCPU count"):
                 runner.require_cpu_capacity(profiles.PROFILES["cpu"])
+
+    def test_capacity_wait_releases_ledger_lock_and_launches_when_cpu_is_free(self):
+        self.api.pods["busy"] = {"id": "busy", "name": "busy", "status": "RUNNING", "cpu": {"vcpuCount": 64}}
+        run = self.make(FakeRemote(dict(OUT)))
+        run.out, run.confirm = mock.Mock(), mock.Mock(return_value="y")
+
+        def sleep(seconds):
+            if self.api.created:
+                self.clock.sleep(seconds)
+                return
+            self.assertEqual(seconds, 300)
+            self.assertEqual(self.ledger.events(), [])
+            with self.ledger.path.with_suffix(".lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.api.pods.pop("busy")
+            self.clock.sleep(seconds)
+
+        run.sleep = sleep
+        self.assertEqual(run.run(self.spec(yes=False, capacity_wait_hours=1))["status"], "ok")
+        self.assertEqual(len(self.api.created), 1)
+        run.confirm.assert_called_once()
+        self.assertTrue(any("Waiting 300s" in call.args[0] for call in run.out.call_args_list))
+
+    def test_capacity_wait_expires_without_reserving_or_creating(self):
+        self.api.pods["busy"] = {"id": "busy", "name": "busy", "status": "RUNNING", "cpu": {"vcpuCount": 64}}
+        run = self.make(None)
+        run.sleep = mock.Mock(side_effect=self.clock.sleep)
+        with self.assertRaisesRegex(Refused, "capacity wait expired after 0.1 h"):
+            run.run(self.spec(capacity_wait_hours=0.1))
+        self.assertEqual(run.sleep.call_args_list, [mock.call(300), mock.call(60)])
+        self.assertEqual(self.ledger.events(), [])
+        self.assertEqual(self.api.created, [])
+
+    def test_queued_run_checks_current_budget_before_reserving(self):
+        self.api.pods["busy"] = {"id": "busy", "name": "busy", "status": "RUNNING", "cpu": {"vcpuCount": 64}}
+        run = self.make(None)
+
+        def sleep(seconds):
+            self.api.pods.pop("busy")
+            self.ledger.reserve("another-run", usd_est=150)
+            self.clock.sleep(seconds)
+
+        run.sleep = sleep
+        with self.assertRaises(budget.BudgetRefused):
+            run.run(self.spec(capacity_wait_hours=1))
+        self.assertEqual(list(self.ledger.runs()), ["another-run"])
+        self.assertEqual(self.api.created, [])
+
+    def test_queued_run_rechecks_local_inputs_before_reserving(self):
+        self.api.pods["busy"] = {"id": "busy", "name": "busy", "status": "RUNNING", "cpu": {"vcpuCount": 64}}
+        run = self.make(None)
+
+        def sleep(seconds):
+            self.api.pods.pop("busy")
+            (self.inputs / "lines.txt").write_text("changed invented input\n")
+            self.clock.sleep(seconds)
+
+        run.sleep = sleep
+        with self.assertRaisesRegex(manifest.ManifestError, "changed since the manifest was written"):
+            run.run(self.spec(capacity_wait_hours=1))
+        self.assertEqual(self.ledger.events(), [])
+        self.assertEqual(self.api.created, [])
 
     def test_deadman_armed_and_reported(self):
         remote = FakeRemote(dict(OUT))

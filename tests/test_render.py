@@ -1,5 +1,7 @@
 """Render recipe and private publication tests. No test uses the network or a pod."""
+import contextlib
 import hashlib
+import io
 import json
 import tarfile
 import tempfile
@@ -127,7 +129,6 @@ class RenderRunnerTest(unittest.TestCase):
         fixture.pods["orphan"] = {"id": "orphan", "name": "heocr-cpu-orphan"}
         ledger = Ledger(root / "spend.jsonl", now=lambda: fixtures.NOW)
         policy = Policy(roots={"synthetic": [root]})
-        messages = []
         publisher = mock.Mock()
         font_manifest = b"invented font manifest"
         args = ["render-lines", "--count", "20000", "--seed", "19", "--dataset", PublisherTest.dataset,
@@ -142,16 +143,16 @@ class RenderRunnerTest(unittest.TestCase):
                                  "lfs": {"oid": render.SOURCE["sha256"]}}]).encode(),
                     font_manifest,
                 ]), mock.patch.object(render, "HubPublisher", return_value=publisher), \
-                mock.patch("builtins.print", side_effect=messages.append):
+                contextlib.redirect_stdout(io.StringIO()) as stdout:
             self.assertEqual(cli.main(args), 0)
         self.assertEqual(fixture.terminated, [])
         self.assertEqual(fixture.created, [])
         self.assertEqual(ledger.events(), [])
         publisher.preflight.assert_called_once_with(PublisherTest.dataset)
         publisher.publish.assert_not_called()
-        self.assertTrue(any("would create" in line for line in messages))
+        self.assertIn("would create", stdout.getvalue())
         if show:
-            print("\n".join(messages))
+            print(stdout.getvalue())
 
     def test_rejects_mode_on_old_revision_and_excessive_count(self):
         args = ["render-lines", "--count", "20000", "--seed", "19", "--dataset", PublisherTest.dataset, "--dry-run"]

@@ -20,6 +20,15 @@ KRAKEN_TRAIN_IMAGE = "ghcr.io/heocr/heocr-compute-kraken-train@"
 STARTUP_POLL_SECONDS = 10
 
 
+def check_hub_inputs(job):
+    policy = Policy.load()
+    for item in job["inputs"]:
+        for path in (f"hf/{item['repo']}/{item['path']}", f"/heocr/in/{item['target']}"):
+            if policy.deny_reason(path):
+                raise Refused("a Hub input matches the local denylist")
+            policy.check_hash(path, item["sha256"])
+
+
 def watch_startup(runner, run_id, pod_id, deadline):
     """Monitor provisioning from the account side until the pod starts or the wait expires."""
     while True:
@@ -72,34 +81,27 @@ def launch(a, profile, api, ledger):
     startup_minutes = getattr(a, "startup_minutes", startup_limit)
     hf_job.require(math.isfinite(startup_minutes) and 0 < startup_minutes <= startup_limit,
                    "startup minutes must be positive and within the quoted startup allowance")
-    policy = Policy.load()
     total = sum(item["size"] for item in job["inputs"])
     largest_snapshot = max(item["max_bytes"] for item in job["snapshots"])
     # Inputs are cached and copied. Keep space for the staging copy of one snapshot.
     hf_job.require(2 * total + sum(s["max_bytes"] for s in job["snapshots"]) + largest_snapshot
                    < profile.disk_gb * 10**9, "declared input and snapshot bytes exceed the pod disk")
-    for item in job["inputs"]:
-        for path in (f"hf/{item['repo']}/{item['path']}", f"/heocr/in/{item['target']}"):
-            if policy.deny_reason(path):
-                raise Refused("a Hub input matches the local denylist")
-            policy.check_hash(path, item["sha256"])
+    check_hub_inputs(job)
 
     runner = Runner(api, ledger)
     run_id = new_run_id(runner.now())
     name = pod_name(HF_PROFILE_MARKER, run_id)
-    spec = SimpleNamespace(profile=profile, hours=a.hours, run_cap=a.run_cap, month_cap=a.month_cap)
-    with ledger.locked():
-        quote = runner.price(spec, ledger.month_to_date()["total"])
-        for line in quote.lines():
-            print(line)
-        budget.check(quote)
-        print(f"Hub inputs: {len(job['inputs'])} files, {total:,} bytes. Job spec: {len(raw):,} bytes.")
+    spec = SimpleNamespace(profile=profile, hours=a.hours, run_cap=a.run_cap, month_cap=a.month_cap,
+                           dry_run=a.dry_run, yes=a.yes, capacity_wait_hours=getattr(a, "capacity_wait_hours", None))
+    print(f"Hub inputs: {len(job['inputs'])} files, {total:,} bytes. Job spec: {len(raw):,} bytes.")
+    with runner.launch_slot(spec) as (quote, waited):
+        if quote is None:
+            return 0
         if a.dry_run:
             print("Dry run. No pod created. The worker checks private Hub access before training.")
             return 0
-        if not a.yes and input(f"Start {profile.pod_type}, worst case USD {quote.usd_est:.2f}? [y/N] ").lower().strip() != "y":
-            return 0
-        runner.require_cpu_capacity(profile)
+        if waited:
+            check_hub_inputs(job)
         reserved = runner.now()
         deadline = reserved + dt.timedelta(hours=a.hours)
         startup_deadline = min(deadline, reserved + dt.timedelta(minutes=startup_minutes))
