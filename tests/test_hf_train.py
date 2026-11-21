@@ -175,3 +175,18 @@ class HfTrainTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(marker.read_text(), "pod delete example\n")
         self.assertNotIn(b"hidden-provider-output", result.stdout + result.stderr)
+
+    def test_entrypoint_disables_inherited_hf_transfer(self):
+        timeout = self.root / "timeout"
+        timeout.write_text(
+            '#!/bin/sh\nif [ "$1" = -s ]; then\n    printf "%s\\n" "$HF_HUB_ENABLE_HF_TRANSFER" > "$MARKER"\nfi\n'
+        )
+        timeout.chmod(0o700)
+        marker = self.root / "transfer-mode"
+        env = {**os.environ, "PATH": f"{self.root}:{os.environ['PATH']}", "MARKER": str(marker),
+               "HEOCR_HF_DEADLINE": str(int(time.time()) + 30), "RUNPOD_POD_ID": "example",
+               "RUNPOD_API_KEY": "invented", "HF_HUB_ENABLE_HF_TRANSFER": "1"}
+        entrypoint = Path(__file__).parents[1] / "docker" / "hf-train-entrypoint.sh"
+        result = subprocess.run(["/bin/sh", str(entrypoint)], env=env, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(marker.read_text(), "0\n")

@@ -43,5 +43,7 @@ trap finish EXIT
 trap 'exit 1' INT TERM
 worker_seconds=$((remaining - 10))
 [ "$worker_seconds" -gt 0 ] || exit 1
+# The provider base enables the optional hf_transfer backend, which this worker does not install.
+export HF_HUB_ENABLE_HF_TRANSFER=0
 export HF_HUB_DISABLE_TELEMETRY=1 HF_HUB_DISABLE_IMPLICIT_TOKEN=1
 timeout -s TERM -k 5s "$worker_seconds" /opt/heocr-venv/bin/python -m heocr_compute.remote.hf_train_pod
