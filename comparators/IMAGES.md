@@ -16,16 +16,16 @@ record. A tag identifies the build and may change.
 
 ## Verified pod image digests
 
-The [successful publishing run](https://github.com/HeOCR/heocr-compute/actions/runs/44882839632) built and pulled back
-these Linux AMD64 images from commit `d56fb8bb642c216958120e5c20e9471cc641abc1`.
-Use their [batch scorer transport](CONTRACT.md) for registered runs.
+The [successful publishing run](https://github.com/HeOCR/heocr-compute/actions/runs/44883953606) built and pulled back
+these Linux AMD64 images from commit `9b98a09a428934b807778e95154754b8e8921b5f`.
+All four include the in-image NOTICE and support the [batch scorer transport](CONTRACT.md).
 
 | Runner | Image reference |
 |---|---|
-| `tesseract` | `ghcr.io/heocr/heocr-compute-comparator-tesseract@sha256:f4128cb4cb2e953580699414cce539ed0037646a36013ffe06a9813b70843274` |
-| `paddle` | `ghcr.io/heocr/heocr-compute-comparator-paddle@sha256:bfee7bf59eb4e14dc8ff8557992a1ac19a1b64436b5a9f6afd76326046d94400` |
-| `kraken` | `ghcr.io/heocr/heocr-compute-comparator-kraken@sha256:8305d40999adf546ccebe18e822b773b7db57a803786637e599f097c4d43cad6` |
-| `trocr` | `ghcr.io/heocr/heocr-compute-comparator-trocr@sha256:68ed3352f60575a0c2b913881e4b6a907285d7cf59b73d0b8e3734cba27480ac` |
+| `tesseract` | `ghcr.io/heocr/heocr-compute-comparator-tesseract@sha256:a2db81807526bb41631f52a9ba4f8fe3d2a98d2ea9941c2ca124d8e3a9194e7c` |
+| `paddle` | `ghcr.io/heocr/heocr-compute-comparator-paddle@sha256:6f79d33371caefc4c22036946c80b1bff695cac5ce670690da99ba18eadd3574` |
+| `kraken` | `ghcr.io/heocr/heocr-compute-comparator-kraken@sha256:991f1181ac65ba54e32d2133d6baec2b8ba49be341fe2e6cbe5ab8a0b301be49` |
+| `trocr` | `ghcr.io/heocr/heocr-compute-comparator-trocr@sha256:7857201325b3148f4d4d2ba6249d9fcea5db7f833f5249a661157fda45e8514d` |
 
 The image digest pins the runtime. The [asset manifest](assets.json) and
 [Kraken runner](kraken_runner.py) pin the recognition weights separately.
