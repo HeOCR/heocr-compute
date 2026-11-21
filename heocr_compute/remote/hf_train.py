@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -26,6 +27,9 @@ def launch(a, profile, api, ledger):
     job = hf_job.parse(raw, a.approved_sha256)
     hf_job.require(profile.cloud == "SECURE", "training requires a Secure Cloud profile")
     hf_job.require(hf_job.matches(hf_job.SECRET, a.hf_secret), "supply the name of a Runpod secret")
+    registry = getattr(a, "registry_auth_id", None)
+    hf_job.require(registry is None or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", registry) is not None,
+                   "supply a Runpod managed registry credential ID")
     hf_job.require(all(math.isfinite(x) and x > 0 for x in (a.hours, a.run_cap, a.month_cap)),
                    "training time and cost caps must be finite and positive")
     policy = Policy.load()
@@ -69,6 +73,8 @@ def launch(a, profile, api, ledger):
     }
     body = profile.body(name, env)
     body.update(image=job["image"], ports=[], startSsh=False)
+    if registry is not None:
+        body["registry"] = registry
     print(f"Reserved run {run_id}. Collect later with heocr-remote collect-hf {run_id}.", flush=True)
     try:
         pod = api.create_pod(body)

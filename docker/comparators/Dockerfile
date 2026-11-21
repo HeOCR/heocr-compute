@@ -1,5 +1,5 @@
 # Python 3.12.16 slim on Debian trixie. Build all targets for linux/amd64.
-FROM docker.io/library/python@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS runtime
+FROM docker.io/library/python@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS base
 
 ENV PYTHONUTF8=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 \
     OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
@@ -8,7 +8,25 @@ RUN printf '%s\n' 'deb [check-valid-until=no] https://snapshot.debian.org/archiv
     > /etc/apt/sources.list.d/debian.sources.list \
     && rm /etc/apt/sources.list.d/debian.sources
 
-FROM runtime AS tesseract-build
+FROM base AS pod-tools
+ADD --checksum=sha256:ae0a2e5ff723c8fceb609e7120dfcaa4d681bf3015adc74141812a21f2bb9486 \
+    https://github.com/runpod/runpodctl/releases/download/v3.1.1/runpodctl-linux-amd64 /tmp/runpodctl
+RUN install -m 0755 /tmp/runpodctl /usr/local/bin/runpodctl \
+    && runpodctl pod delete --help >/dev/null && command -v timeout
+
+COPY pyproject.toml /build/
+COPY heocr_compute /build/heocr_compute
+RUN python -m venv /opt/heocr-venv \
+    && /opt/heocr-venv/bin/pip install /build 'huggingface_hub==0.36.2' \
+    && /opt/heocr-venv/bin/pip check
+
+FROM base AS runtime
+COPY --from=pod-tools /usr/local/bin/runpodctl /usr/local/bin/runpodctl
+COPY --from=pod-tools /opt/heocr-venv /opt/heocr-venv
+COPY docker/hf-train-entrypoint.sh /opt/heocr-hf-entrypoint.sh
+COPY docker/comparators/entrypoint.sh /opt/comparators/entrypoint.sh
+
+FROM base AS tesseract-build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake libleptonica-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
@@ -24,14 +42,14 @@ RUN mkdir /tmp/tesseract && tar -xf /tmp/tesseract.tar.gz -C /tmp/tesseract --st
 
 FROM runtime AS adapter
 COPY comparators/runner.py comparators/assets.json ./
-ENTRYPOINT ["python", "/opt/comparators/runner.py"]
+ENTRYPOINT ["/bin/sh", "/opt/comparators/entrypoint.sh", "/opt/comparators/runner.py"]
 
 FROM adapter AS tesseract
 RUN apt-get update && apt-get install -y --no-install-recommends libleptonica6 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=tesseract-build /opt/tesseract/bin/tesseract /usr/local/bin/tesseract
 
-FROM runtime AS paddle-build
+FROM base AS paddle-build
 RUN apt-get update && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 COPY comparators/requirements-paddle.txt ./
@@ -50,10 +68,10 @@ FROM runtime AS kraken
 COPY comparators/kraken_runner.py comparators/requirements-kraken-linux-amd64.txt ./
 RUN python -m pip install --only-binary=:all: --extra-index-url https://download.pytorch.org/whl/cpu \
     -r requirements-kraken-linux-amd64.txt && python -m pip check
-ENTRYPOINT ["python", "/opt/comparators/kraken_runner.py"]
+ENTRYPOINT ["/bin/sh", "/opt/comparators/entrypoint.sh", "/opt/comparators/kraken_runner.py"]
 
 FROM adapter AS trocr
-ENV HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false
+ENV TOKENIZERS_PARALLELISM=false
 COPY comparators/trocr.py comparators/requirements-trocr-linux-amd64.txt ./
 RUN python -m pip install --only-binary=:all: --extra-index-url https://download.pytorch.org/whl/cpu \
     -r requirements-trocr-linux-amd64.txt && python -m pip check

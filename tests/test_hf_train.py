@@ -66,9 +66,18 @@ class HfTrainTest(unittest.TestCase):
         self.assertEqual(body["env"]["HEOCR_HF_TOKEN"], "{{ RUNPOD_SECRET_training_hub }}")
         self.assertFalse(body["startSsh"])
         self.assertEqual(body["ports"], [])
+        self.assertNotIn("registry", body)
         self.assertNotIn("RUNPOD_SECRET", stdout.getvalue())
         self.assertIn("autonomous", self.ledger.events()[0])
         self.assertEqual([e["event"] for e in self.ledger.events()], ["reserve", "pod"])
+
+    def test_registry_credential_is_passed_to_provider_for_private_image(self):
+        self.args.registry_auth_id = "registry-fixture"
+        with patch.object(Policy, "load", return_value=Policy()), contextlib.redirect_stdout(io.StringIO()) as stdout:
+            self.assertEqual(hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger), 0)
+        body, = self.api.create_pod.call_args.args
+        self.assertEqual(body["registry"], "registry-fixture")
+        self.assertNotIn("registry-fixture", stdout.getvalue())
 
     def test_dry_run_creates_nothing_and_denylist_blocks(self):
         self.args.dry_run = True
