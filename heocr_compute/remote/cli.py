@@ -106,6 +106,18 @@ def cmd_render(a):
     return _report(launch(a, _connect))
 
 
+def cmd_hf_train(a):
+    from .hf_train import launch
+
+    return launch(a, _profile(a), *_connect())
+
+
+def cmd_collect_hf(a):
+    from .hf_train import collect
+
+    return collect(a, *_connect())
+
+
 def cmd_smoke(a):
     work = Path(tempfile.mkdtemp(prefix="smoke-", dir=state_dir()))
     (work / "input.txt").write_text(SMOKE_INPUT, encoding="utf-8")
@@ -230,6 +242,25 @@ def main(argv=None) -> int:
     line.add_argument("--code-revision", default=render.CODE, help="full public hocrsyngen commit SHA")
     line.add_argument("--font-manifest-sha256", default=render.FONT_SHA)
     line.add_argument("--dataset", required=True, help="existing private HeOCR HF dataset")
+
+    train = sub.add_parser("hf-train", help="launch autonomous training from approved private HF pins")
+    train.set_defaults(fn=cmd_hf_train)
+    train.add_argument("--profile", choices=["cpu", "gpu", "smoke"], required=True)
+    train.add_argument("--cpu-flavor")
+    train.add_argument("--vcpus", type=int)
+    train.add_argument("--job", required=True, help="approved private training job specification")
+    train.add_argument("--approved-sha256", required=True, help="lead-approved SHA-256 of the exact job bytes")
+    train.add_argument("--hf-secret", required=True, help="Runpod managed secret name")
+    train.add_argument("--hours", type=float, required=True)
+    train.add_argument("--run-cap", type=float, required=True)
+    train.add_argument("--month-cap", type=float, default=budget.MONTH_CAP_USD)
+    train.add_argument("--dry-run", action="store_true")
+    train.add_argument("--yes", action="store_true")
+
+    collect = sub.add_parser("collect-hf", help="verify and collect an autonomous run after pod teardown")
+    collect.set_defaults(fn=cmd_collect_hf)
+    collect.add_argument("run_id")
+    collect.add_argument("--results", default="~/heocr-remote/results")
 
     s = sub.add_parser("smoke", help=f"the smallest end-to-end run (capped at ${SMOKE_CAP_USD:.2f})")
     run_flags(s)

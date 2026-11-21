@@ -6,7 +6,9 @@ HeOCR's tooling for running open-data training and engine jobs on rented machine
 
 Every pod is terminated at the end, whether the job succeeded or failed.
 
-Python 3.11 or later. The core runner uses the standard library. The optional line-render publisher uses the Hugging Face Hub client.
+Python 3.11 or later. The core runner uses the standard library. The optional line-render publisher and autonomous training collector use the Hugging Face Hub client.
+
+See [autonomous private Hub training](docs/autonomous-hf-training.md) for approved jobs that pull inputs on the pod and return snapshots through the private Hub.
 
 ```sh
 pip install .
