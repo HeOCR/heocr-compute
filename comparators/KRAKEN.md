@@ -26,9 +26,9 @@ has conflicting size wording. The pinned file is explicitly the small variant.
 
 With Python 3.12, create a dedicated venv and install
 `pip install -r comparators/requirements-kraken-macos-arm.txt`. It records the
-macOS ARM environment; Linux AMD64 and macOS Intel require separately resolved
-and frozen dependencies and have not been tested. Package and system library
-hashes are not locked. Download `small.safetensors`, `BiblIA_01.mlmodel`,
+macOS ARM environment. Linux AMD64 has a separate lock file and
+[container recipe](IMAGES.md). macOS Intel remains unverified. The venv recipe
+pins package versions. Download `small.safetensors`, `BiblIA_01.mlmodel`,
 `Ashkenazi_01.mlmodel`, `Italian_01.mlmodel`, and `Sephardi_01.mlmodel` from
 the corresponding Zenodo records into an asset directory. The runner verifies
 weights against the digests in `kraken_runner.py`, and page mode verifies the

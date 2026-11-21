@@ -11,7 +11,8 @@ These CPU recipes target Python 3.12 and Tesseract 5.5.3 on macOS or Linux AMD64
 Install Tesseract 5.5.3 from a verified distribution or its [source release](https://github.com/tesseract-ocr/tesseract/releases/tag/5.5.3),
 including its image-library dependencies. The runner checks its reported version,
 not the binary or linked-library hashes; record those and the OS in the run record.
-No container image is supplied. For Rivok Paddle, install Git and:
+See [Linux AMD64 images](IMAGES.md) for digest-pinned container builds. For a
+local Rivok Paddle installation, install Git and:
 
 ```sh
 python3.12 -m venv .venv

@@ -1,0 +1,73 @@
+name: Publish comparator images
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.repository == 'HeOCR/heocr-compute' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [tesseract, paddle, kraken, trocr]
+    env:
+      TARGET: ${{ matrix.target }}
+      IMAGE: ghcr.io/heocr/heocr-compute-comparator-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build and check Linux AMD64 runtime
+        run: |
+          context="$RUNNER_TEMP/comparator-context"
+          local_image="comparator:$TARGET"
+          mkdir "$context"
+          git archive "$GITHUB_SHA" comparators docker/comparators/Dockerfile | tar -x -C "$context"
+          docker buildx build --platform linux/amd64 --file "$context/docker/comparators/Dockerfile" \
+            --target "$TARGET" --load --provenance=false --sbom=false --tag "$local_image" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" "$context"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$local_image")" = linux/amd64
+          docker run --rm --network none "$local_image" --help >/dev/null
+          case "$TARGET" in
+            tesseract)
+              docker run --rm --network none --entrypoint tesseract "$local_image" --version \
+                | sed -n '1p' | grep -Fx 'tesseract 5.5.3'
+              ;;
+            paddle)
+              docker run --rm --network none --entrypoint python "$local_image" \
+                -c 'from paddleocr_hebrew import HebrewOCR'
+              ;;
+            kraken)
+              docker run --rm --network none --entrypoint python "$local_image" \
+                -c 'import kraken; from pathlib import Path; from kraken_runner import verify, SEGMENTER_SHA; verify(Path(kraken.__file__).parent / "blla.mlmodel", SEGMENTER_SHA)'
+              docker run --rm --network none --entrypoint kraken "$local_image" --version
+              ;;
+            trocr)
+              docker run --rm --network none --entrypoint python "$local_image" \
+                -c 'from transformers import VisionEncoderDecoderModel; import torch; assert torch.version.cuda is None'
+              ;;
+          esac
+      - name: Publish and verify digest
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          tag="$IMAGE:sha-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker tag "comparator:$TARGET" "$tag"
+          docker push "$tag"
+          digest="$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          pinned="$IMAGE@$digest"
+          docker pull --platform linux/amd64 "$pinned"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$pinned")" = linux/amd64
+          printf '| Runner | Image | Source revision |\n|---|---|---|\n| %s | `%s` | `%s` |\n' \
+            "$TARGET" "$pinned" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
