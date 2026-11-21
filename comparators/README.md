@@ -64,13 +64,13 @@ remain in the record.
 | Tesseract fast | ✓ | ✓ | ✓ | ✓ | — | — | Adapter supplied |
 | Rivok Tesseract full and lite | ✓ | ✓ | ✓ | ✓ | — | — | Separate adapters supplied |
 | Rivok Paddle flagship | ✓ | ✓ | ✓ | ✓ | — | — | Adapter supplied; no niqqud |
-| Kraken PP-OCRv6 | — | ✓ | — | ✓ | ✓ | ✓ | Blocked: choose exact model and page segmentation, hash and test |
+| Kraken PP-OCRv6 | — | ✓ | — | ✓ | ✓ | ✓ | Candidate runner supplied; evaluation configuration and rights/exposure review pending |
 | cyttic base and large | — | — | — | — | ✓ | — | Blocked: decoder/tokenizer and training lineage review |
-| BiblIA general and script-specific | — | — | — | — | — | ✓ | Blocked: matching scripts, asset hashes, licences and share-alike decision |
+| BiblIA general and script-specific | — | — | — | — | — | ✓ | Candidate runners supplied; matching scripts and share-alike decision pending |
 
 [Kraken's small record](https://zenodo.org/records/21788405) declares Apache-2.0
 and lists `small.safetensors`; its title resolves a prior small/medium naming
-ambiguity, but this does not select the model or segmentation for a run.
+ambiguity, but this does not select the model or segmentation for a run. See [candidate Kraken and BiblIA runners](KRAKEN.md).
 Additional language families require a specific eligible pretrained Hebrew reader,
 not just framework support. Stock [PaddleOCR multilingual recognition](https://www.paddleocr.ai/main/en/version3.x/algorithm/PP-OCRv5/PP-OCRv5_multi_languages.html)
 does not list Hebrew in the cited model list; Rivok's model is a separate reader.
