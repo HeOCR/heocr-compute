@@ -199,13 +199,13 @@ class RunnerTest(unittest.TestCase):
         self.assertGreater(f["usd"], 0)
         self.assertEqual(self.ledger.month_to_date()["open_estimate"], 0)
 
-    def test_cpu_launch_refuses_when_account_slots_are_full(self):
+    def test_dry_run_and_explicit_fail_fast_do_not_join_the_queue(self):
         self.api.pods["existing"] = {"id": "existing", "name": "other-account-workload", "status": "PROVISIONING",
                                      "cpu": {"vcpuCount": 64}, "runtime": None}
         runner = self.make(None)
         self.assertEqual(runner.run(self.spec(dry_run=True))["status"], "dry_run")
         with self.assertRaisesRegex(Refused, "requested 2 vCPUs, 0 of 64 available"):
-            runner.run(self.spec())
+            runner.run(self.spec(capacity_wait_hours=None))
         self.assertEqual(self.api.created, [])
         self.assertEqual(self.api.terminated, [])
         self.assertEqual(self.ledger.events(), [])
@@ -251,7 +251,9 @@ class RunnerTest(unittest.TestCase):
                 runner.require_cpu_capacity(profiles.PROFILES["cpu"])
 
     def test_capacity_wait_releases_ledger_lock_and_launches_when_cpu_is_free(self):
-        self.api.pods["busy"] = {"id": "busy", "name": "busy", "status": "RUNNING", "cpu": {"vcpuCount": 64}}
+        for vcpus in (32, 16, 8, 4, 2):
+            pod_id = f"pod-{vcpus}"
+            self.api.pods[pod_id] = {"id": pod_id, "name": pod_id, "status": "RUNNING", "cpu": {"vcpuCount": vcpus}}
         run = self.make(FakeRemote(dict(OUT)))
         run.out, run.confirm = mock.Mock(), mock.Mock(return_value="y")
 
@@ -260,15 +262,21 @@ class RunnerTest(unittest.TestCase):
                 self.clock.sleep(seconds)
                 return
             self.assertEqual(seconds, 300)
-            self.assertEqual(self.ledger.events(), [])
+            waiting, = self.ledger.waiting()
+            self.assertEqual((waiting["event"], waiting["vcpus"], waiting["wait_seconds"]), ("queue", 8, 21_600))
+            self.assertEqual(self.ledger.month_to_date()["total"], 0)
             with self.ledger.path.with_suffix(".lock").open("a") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self.api.pods.pop("busy")
+            self.api.pods.pop("pod-4")
+            self.api.pods.pop("pod-2")
             self.clock.sleep(seconds)
 
         run.sleep = sleep
-        self.assertEqual(run.run(self.spec(yes=False, capacity_wait_hours=1))["status"], "ok")
+        request = profiles.PROFILES["cpu"].sized(vcpus=8)
+        self.assertEqual(run.run(self.spec(profile=request, yes=False))["status"], "ok")
         self.assertEqual(len(self.api.created), 1)
+        self.assertEqual(self.ledger.waiting(), [])
+        self.assertEqual([e["event"] for e in self.ledger.events()], ["queue", "reserve", "pod", "final"])
         run.confirm.assert_called_once()
         self.assertTrue(any("Waiting 300s" in call.args[0] for call in run.out.call_args_list))
 
@@ -279,7 +287,10 @@ class RunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(Refused, "capacity wait expired after 0.1 h"):
             run.run(self.spec(capacity_wait_hours=0.1))
         self.assertEqual(run.sleep.call_args_list, [mock.call(300), mock.call(60)])
-        self.assertEqual(self.ledger.events(), [])
+        self.assertEqual([e["event"] for e in self.ledger.events()], ["queue", "queue_end"])
+        self.assertEqual(self.ledger.events()[-1]["status"], "expired")
+        self.assertEqual(self.ledger.waiting(), [])
+        self.assertEqual(self.ledger.month_to_date()["total"], 0)
         self.assertEqual(self.api.created, [])
 
     def test_queued_run_checks_current_budget_before_reserving(self):
@@ -294,7 +305,9 @@ class RunnerTest(unittest.TestCase):
         run.sleep = sleep
         with self.assertRaises(budget.BudgetRefused):
             run.run(self.spec(capacity_wait_hours=1))
-        self.assertEqual(list(self.ledger.runs()), ["another-run"])
+        self.assertEqual([e["run_id"] for e in self.ledger.month_to_date()["open"]], ["another-run"])
+        self.assertEqual(self.ledger.events()[-1]["status"], "failed")
+        self.assertEqual(self.ledger.waiting(), [])
         self.assertEqual(self.api.created, [])
 
     def test_queued_run_rechecks_local_inputs_before_reserving(self):
@@ -309,7 +322,18 @@ class RunnerTest(unittest.TestCase):
         run.sleep = sleep
         with self.assertRaisesRegex(manifest.ManifestError, "changed since the manifest was written"):
             run.run(self.spec(capacity_wait_hours=1))
-        self.assertEqual(self.ledger.events(), [])
+        self.assertEqual([e["event"] for e in self.ledger.events()], ["queue", "queue_end"])
+        self.assertEqual(self.ledger.waiting(), [])
+        self.assertEqual(self.api.created, [])
+
+    def test_interrupted_wait_closes_local_queue_entry(self):
+        self.api.pods["busy"] = {"id": "busy", "name": "busy", "status": "RUNNING", "cpu": {"vcpuCount": 64}}
+        run = self.make(None)
+        run.sleep = mock.Mock(side_effect=KeyboardInterrupt)
+        with self.assertRaises(KeyboardInterrupt):
+            run.run(self.spec())
+        self.assertEqual(self.ledger.events()[-1]["status"], "cancelled")
+        self.assertEqual(self.ledger.waiting(), [])
         self.assertEqual(self.api.created, [])
 
     def test_deadman_armed_and_reported(self):

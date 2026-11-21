@@ -178,6 +178,21 @@ class PodListTest(unittest.TestCase):
 
 
 class PerAccountLedgerTest(unittest.TestCase):
+    def test_queue_display_ignores_expired_dead_and_other_account_waits(self):
+        now = dt.datetime(2026, 11, 18, 15, 0, tzinfo=dt.timezone.utc)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "spend.jsonl"
+            led = Ledger(path, now=lambda: now, account="heocr")
+            led.queue("waiting", vcpus=8, wait_seconds=600)
+            led.queue("expired", vcpus=2, wait_seconds=60)
+            with mock.patch.object(os, "getpid", return_value=999999):
+                led.queue("dead", vcpus=4, wait_seconds=600)
+            Ledger(path, now=lambda: now, account="other").queue("other", vcpus=16, wait_seconds=600)
+            now += dt.timedelta(minutes=2)
+            with mock.patch("heocr_compute.remote.ledger.pid_alive", side_effect=lambda pid: pid != 999999):
+                self.assertEqual([e["run_id"] for e in led.waiting()], ["waiting"])
+            self.assertEqual(led.month_to_date()["total"], 0)
+
     def test_only_this_accounts_runs_count(self):
         now = dt.datetime(2026, 11, 18, 15, 0, tzinfo=dt.timezone.utc)
         with tempfile.TemporaryDirectory() as d:

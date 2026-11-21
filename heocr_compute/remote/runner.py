@@ -35,7 +35,7 @@ from pathlib import Path
 
 from . import budget, manifest, profiles, render_job
 from .api import RunPodError
-from .ledger import Ledger, utcnow
+from .ledger import Ledger, pid_alive as _pid_alive, utcnow
 from .policy import Policy, Refused
 from .ssh import Remote, SSHError, public_key
 
@@ -132,7 +132,7 @@ class Spec:
     policy: object = None     # policy.Policy; loaded from the local files when None
     prove_deadman: bool = False  # smoke only: fire the pod's switch at the end and check the pod is gone
     render_bundle: bool = False  # fixed render recipe only: bounded tar + its checksum manifest
-    capacity_wait_hours: float | None = None
+    capacity_wait_hours: float | None = DEFAULT_CAPACITY_WAIT_HOURS
 
 
 def new_run_id(now: dt.datetime) -> str:
@@ -195,16 +195,6 @@ def _parse_ts(s: str | None) -> dt.datetime | None:
         return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
     except ValueError:
         return None
-
-
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(int(pid), 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 def terminate_confirmed(api, pod_id: str, sleep=time.sleep, attempts: int = 6) -> bool:
@@ -398,50 +388,63 @@ class Runner:
                                          f"{pending} in unconfirmed reservations)")
 
     @contextmanager
-    def launch_slot(self, spec):
-        """Yield (quote, waited) with the lock held through reservation, or (None, False) on decline."""
+    def launch_slot(self, spec, run_id: str):
+        """Yield (quote, waited) under the lock for the caller to reserve, or (None, False) on decline."""
         wait_hours = spec.capacity_wait_hours
         wait_seconds = None if wait_hours is None else wait_hours * 3600
         if wait_seconds is not None and (not math.isfinite(wait_seconds) or wait_seconds <= 0):
             raise ValueError("capacity wait must be a finite, positive number of hours")
         deadline = approved_cost = None
-        while True:
-            with self.ledger.locked():
-                if deadline is not None and self.clock() >= deadline:
-                    break
-                quote = self.price(spec, self.ledger.month_to_date()["total"])
-                new_cost = approved_cost is None or quote.usd_est > approved_cost
-                if new_cost:
-                    for line in quote.lines():
-                        self.out(line)
-                budget.check(quote)
-                if new_cost:
-                    if not (spec.dry_run or spec.yes) and self.confirm(
-                            f"start {spec.profile.pod_type}, worst case ${quote.usd_est:.2f}? [y/N] ").strip().lower() != "y":
-                        yield None, False
-                        return
-                    approved_cost = quote.usd_est
-                if spec.dry_run:
-                    yield quote, False
-                    return
-                try:
-                    self.require_cpu_capacity(spec.profile)
-                except CpuCapacityUnavailable as error:
-                    if wait_seconds is None:
-                        raise
-                    shortage = str(error)
-                else:
+        queue_end = "failed"
+        try:
+            while True:
+                with self.ledger.locked():
                     if deadline is not None and self.clock() >= deadline:
                         break
-                    yield quote, deadline is not None
-                    return
-            if deadline is None:
-                deadline = self.clock() + wait_seconds
-            delay = min(CAPACITY_POLL_SECONDS, deadline - self.clock())
-            if delay > 0:
-                self.out(f"{shortage}. Waiting {delay:.0f}s for CPU capacity.")
-                self.sleep(delay)
-        raise Refused(f"capacity wait expired after {wait_hours:g} h ({shortage})")
+                    quote = self.price(spec, self.ledger.month_to_date()["total"])
+                    new_cost = approved_cost is None or quote.usd_est > approved_cost
+                    if new_cost:
+                        for line in quote.lines():
+                            self.out(line)
+                    budget.check(quote)
+                    if new_cost:
+                        if not (spec.dry_run or spec.yes) and self.confirm(
+                                f"start {spec.profile.pod_type}, worst case ${quote.usd_est:.2f}? [y/N] ").strip().lower() != "y":
+                            queue_end = "declined"
+                            yield None, False
+                            return
+                        approved_cost = quote.usd_est
+                    if spec.dry_run:
+                        yield quote, False
+                        return
+                    try:
+                        self.require_cpu_capacity(spec.profile)
+                    except CpuCapacityUnavailable as error:
+                        if wait_seconds is None:
+                            raise
+                        shortage = str(error)
+                        if deadline is None:
+                            self.ledger.queue(run_id, vcpus=spec.profile.vcpus, wait_seconds=wait_seconds)
+                            deadline = self.clock() + wait_seconds
+                    else:
+                        if deadline is not None and self.clock() >= deadline:
+                            break
+                        yield quote, deadline is not None
+                        queue_end = None  # The reservation closes the wait in the ledger.
+                        return
+                delay = min(CAPACITY_POLL_SECONDS, deadline - self.clock())
+                if delay > 0:
+                    self.out(f"Run {run_id}: {shortage}. Waiting {delay:.0f}s for CPU capacity.")
+                    self.sleep(delay)
+            queue_end = "expired"
+            raise Refused(f"capacity wait expired after {wait_hours:g} h ({shortage})")
+        except KeyboardInterrupt:
+            queue_end = "cancelled"
+            raise
+        finally:
+            if deadline is not None and queue_end is not None:
+                with self.ledger.locked():
+                    self.ledger.end_queue(run_id, status=queue_end)
 
     # -- the run -----------------------------------------------------------------------------------
     def run(self, spec: Spec) -> dict:
@@ -450,7 +453,7 @@ class Runner:
         self.out(f"inputs: {len(entries)} files, {size / (1 << 20):.1f} MB, hashes, open roots and local denylist checked")
         run_id = new_run_id(self.now())
         name = pod_name(spec.profile.name, run_id)
-        with self.launch_slot(spec) as (q, waited):
+        with self.launch_slot(spec, run_id) as (q, waited):
             if q is None:
                 return {"run_id": run_id, "status": "declined"}
             if spec.dry_run:
