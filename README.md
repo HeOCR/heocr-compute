@@ -10,6 +10,8 @@ Python 3.11 or later. The core runner uses the standard library. The optional li
 
 See [autonomous private Hub training](docs/autonomous-hf-training.md) for approved jobs that pull inputs on the pod and return snapshots through the private Hub.
 
+For comparator containers, see the [image digests, licences, and corresponding source](comparators/IMAGES.md#licences-and-source).
+
 ```sh
 pip install .
 heocr-remote profiles

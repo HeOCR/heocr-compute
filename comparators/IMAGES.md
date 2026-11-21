@@ -16,16 +16,16 @@ record. A tag identifies the build and may change.
 
 ## Verified pod image digests
 
-The [successful publishing run](https://github.com/HeOCR/heocr-compute/actions/runs/44879291570) built and pulled back
-these Linux AMD64 images from commit `924efa744d6d1b766965b74bfe3bb1f9f3c754d8`.
+The [successful publishing run](https://github.com/HeOCR/heocr-compute/actions/runs/44882839632) built and pulled back
+these Linux AMD64 images from commit `d56fb8bb642c216958120e5c20e9471cc641abc1`.
 Use their [batch scorer transport](CONTRACT.md) for registered runs.
 
 | Runner | Image reference |
 |---|---|
-| `tesseract` | `ghcr.io/heocr/heocr-compute-comparator-tesseract@sha256:a324f263d689dc3178b4bc842ac0225f4f4d6181807f98eafb99e7defefc19ea` |
-| `paddle` | `ghcr.io/heocr/heocr-compute-comparator-paddle@sha256:027e5f5d65e95392b0113c38098a5fa0540abe5273fa34f505354b24c305fae8` |
-| `kraken` | `ghcr.io/heocr/heocr-compute-comparator-kraken@sha256:e88a73be6857958df0b12785eaa419cc027b6a056ae68a3c75e271756afd28e5` |
-| `trocr` | `ghcr.io/heocr/heocr-compute-comparator-trocr@sha256:8f0c77fbc41d29f254ac4e52e18d29456e65df877d50359d4cbedf22caefba7d` |
+| `tesseract` | `ghcr.io/heocr/heocr-compute-comparator-tesseract@sha256:f4128cb4cb2e953580699414cce539ed0037646a36013ffe06a9813b70843274` |
+| `paddle` | `ghcr.io/heocr/heocr-compute-comparator-paddle@sha256:bfee7bf59eb4e14dc8ff8557992a1ac19a1b64436b5a9f6afd76326046d94400` |
+| `kraken` | `ghcr.io/heocr/heocr-compute-comparator-kraken@sha256:8305d40999adf546ccebe18e822b773b7db57a803786637e599f097c4d43cad6` |
+| `trocr` | `ghcr.io/heocr/heocr-compute-comparator-trocr@sha256:68ed3352f60575a0c2b913881e4b6a907285d7cf59b73d0b8e3734cba27480ac` |
 
 The image digest pins the runtime. The [asset manifest](assets.json) and
 [Kraken runner](kraken_runner.py) pin the recognition weights separately.
@@ -71,3 +71,27 @@ docker buildx build --platform linux/amd64 --load --target tesseract \
 ```
 
 — roster[openai/codex#shay-macbook-m4]@heocr/opensource
+
+
+## Licences and source
+
+The image's source revision identifies the HeOCR adapter and build recipe.
+See the [HeOCR licence](../LICENSE) and [Dockerfile](../docker/comparators/Dockerfile).
+The recipe records the Python base digest and Debian snapshot. The Debian
+packages carry their copyright and licence files under `/usr/share/doc`.
+No HeOCR or comparator recognition checkpoints are copied into these images.
+
+- The pod images include the unmodified Runpod CLI v3.1.1 executable under
+  GPL-3.0. Its [corresponding source and build files](https://github.com/runpod/runpodctl/tree/72afce1305ad3a25217aafdb9022a16e9b569661)
+  and [licence](https://github.com/runpod/runpodctl/blob/72afce1305ad3a25217aafdb9022a16e9b569661/LICENSE)
+  are available from that release's source commit.
+- Tesseract includes Tesseract 5.5.3, built from the upstream [source archive](https://codeload.github.com/tesseract-ocr/tesseract/tar.gz/refs/tags/5.5.3)
+  under [Apache-2.0](https://github.com/tesseract-ocr/tesseract/blob/5.5.3/LICENSE).
+- Paddle includes the pinned [Rivok wrapper and notices](https://github.com/RivoksLab/paddleocr-hebrew/tree/3baae91ad6479ef0473f901b4ed96366ae6c1670)
+  under Apache-2.0, and [ONNX Runtime](https://github.com/microsoft/onnxruntime/tree/v1.32.0)
+  under MIT. The [OpenCV wheel's licence and source records](https://pypi.org/project/opencv-python/5.1.0.95/)
+  cover its bundled FFmpeg (LGPL-2.1) and Qt (LGPL-3.0) binaries.
+- Keep Kraken and TrOCR private under the project’s open-licences-only policy.
+  Their exact Linux AMD64 PyTorch CPU wheel has `AT_MKL_ENABLED() == 1`, and
+  `libtorch_cpu.so` contains Intel oneMKL. Intel offers oneMKL under the
+  [Intel Simplified Software License](https://www.intel.com/content/www/us/en/developer/articles/tool/onemkl-license-faq.html).
