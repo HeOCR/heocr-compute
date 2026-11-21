@@ -16,18 +16,16 @@ record. A tag identifies the build and may change.
 
 ## Verified pod image digests
 
-The [successful publishing run](https://github.com/HeOCR/heocr-compute/actions/runs/44878288865) built and pulled back
-these Linux AMD64 images from commit `86aa84d2b52a77e0077951d89e2f2667f78bf685`.
+The [successful publishing run](https://github.com/HeOCR/heocr-compute/actions/runs/44879291570) built and pulled back
+these Linux AMD64 images from commit `924efa744d6d1b766965b74bfe3bb1f9f3c754d8`.
+Use their [batch scorer transport](CONTRACT.md) for registered runs.
 
 | Runner | Image reference |
 |---|---|
-| `tesseract` | `ghcr.io/heocr/heocr-compute-comparator-tesseract@sha256:701d58c9a17b1d937d09a89254f5002722a294d68c0b0c1d18269c608745a83b` |
-| `paddle` | `ghcr.io/heocr/heocr-compute-comparator-paddle@sha256:6a5d87ca16e87f6f0fdbc05c15118a1cd2300f0c6421580e58eef80b56f410f3` |
-| `kraken` | `ghcr.io/heocr/heocr-compute-comparator-kraken@sha256:86eedd8354462eb189b8cea5ec29d52a7957fc4eec18a8a91fba686456c9118c` |
-| `trocr` | `ghcr.io/heocr/heocr-compute-comparator-trocr@sha256:31371c54617df5cff893c1c52ebbd039753acb92abe96dc2965eb0d546519b05` |
-
-The digests above predate the batch transport. For registered runs, select a
-later build with the [batch scorer transport](CONTRACT.md).
+| `tesseract` | `ghcr.io/heocr/heocr-compute-comparator-tesseract@sha256:a324f263d689dc3178b4bc842ac0225f4f4d6181807f98eafb99e7defefc19ea` |
+| `paddle` | `ghcr.io/heocr/heocr-compute-comparator-paddle@sha256:027e5f5d65e95392b0113c38098a5fa0540abe5273fa34f505354b24c305fae8` |
+| `kraken` | `ghcr.io/heocr/heocr-compute-comparator-kraken@sha256:e88a73be6857958df0b12785eaa419cc027b6a056ae68a3c75e271756afd28e5` |
+| `trocr` | `ghcr.io/heocr/heocr-compute-comparator-trocr@sha256:8f0c77fbc41d29f254ac4e52e18d29456e65df877d50359d4cbedf22caefba7d` |
 
 The image digest pins the runtime. The [asset manifest](assets.json) and
 [Kraken runner](kraken_runner.py) pin the recognition weights separately.
