@@ -30,13 +30,22 @@ jobs:
           context="$RUNNER_TEMP/comparator-context"
           local_image="comparator:$TARGET"
           mkdir "$context"
-          git archive "$GITHUB_SHA" comparators docker/comparators/Dockerfile | tar -x -C "$context"
+          git archive "$GITHUB_SHA" comparators docker/comparators docker/hf-train-entrypoint.sh \
+            pyproject.toml heocr_compute | tar -x -C "$context"
           docker buildx build --platform linux/amd64 --file "$context/docker/comparators/Dockerfile" \
             --target "$TARGET" --load --provenance=false --sbom=false --tag "$local_image" \
             --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" "$context"
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$local_image")" = linux/amd64
           docker run --rm --network none "$local_image" --help >/dev/null
+          if output="$(docker run --rm --network none -e HEOCR_HF_JOB='{}' \
+            -e HEOCR_HF_DEADLINE=invalid "$local_image" 2>&1)"; then
+            echo 'Invalid pod deadline unexpectedly accepted' >&2
+            exit 1
+          fi
+          grep -Fx 'Missing valid pod deadline' <<< "$output"
+          docker run --rm --network none --entrypoint /opt/heocr-venv/bin/python "$local_image" \
+            -c 'import heocr_compute.remote.hf_train_pod, huggingface_hub'
           case "$TARGET" in
             tesseract)
               docker run --rm --network none --entrypoint tesseract "$local_image" --version \

@@ -34,15 +34,22 @@ docker run --rm --platform linux/amd64 --network none \
 ```
 
 For Kraken, omit the `run` action. For the TrOCR candidate use `--mode line`.
-Anyone pulling a private package needs GHCR read access. For pod use, the
-approved compute job must be able to pull the image by digest and stage the
-same assets. Keep its data transfer, budget and lifecycle on the project's
-authorized autonomous pod path. Eval selects the applicable models and
-freezes segmentation, order and scorer settings separately.
+For pod use, choose a digest from a publishing run that checked the autonomous
+entrypoint. The image starts the existing [private-Hub supervisor](../docs/autonomous-hf-training.md)
+when the launcher supplies the approved job spec. In the pinned job entrypoint,
+invoke `python /opt/comparators/runner.py` (or `kraken_runner.py`) with the same
+arguments as above, using staged inputs and verified assets. The supervisor
+checks inputs and publishes declared snapshots, then attempts pod termination.
+
+Set `--registry-auth-id` on `heocr-remote hf-train` to the ID of the Runpod-managed
+registry credential with GHCR pull access. Use the approved image digest in the
+job spec. Keep data transfer, budget and lifecycle on the authorized autonomous
+pod path. Eval freezes the applicable models, segmentation, order and scorer
+settings separately.
 
 To build locally from a clean committed revision, use a directory created
-from `git archive HEAD comparators docker/comparators/Dockerfile` as the
-Docker build context:
+from the source paths fetched by the publishing workflow as the Docker build
+context:
 
 ```sh
 docker buildx build --platform linux/amd64 --load --target tesseract \

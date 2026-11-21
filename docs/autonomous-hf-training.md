@@ -43,6 +43,9 @@ heocr-remote hf-train --profile cpu --job "$JOB" --approved-sha256 "$JOB_SHA" \
   --hf-secret "$RUNPOD_HF_SECRET_NAME" --hours "$HOURS" --run-cap "$USD_CAP" --dry-run
 ```
 
+For a private worker image, add `--registry-auth-id` with the ID of a Runpod-managed
+registry credential that has pull access.
+
 The dry run checks the contract, exact job SHA, disk declarations, local denylist and live quote. Remove `--dry-run` after the launch decision. The launcher records the reservation before create and returns the run ID and pod ID. The Secure Cloud pod exposes no SSH port. Keep the launch and any monitoring outside the local power scheduler. After creation, the Mac can sleep or disconnect while the pod works. An ambiguous create keeps the reservation open and must be reconciled before another launch. [Runpod pod create API](https://docs.runpod.io/api-reference-v2/pods/create-a-pod)
 
 The pod arms its deadline guard before making Hub requests. It checks that the pinned source repositories are private, downloads only declared files, verifies byte sizes and SHA-256, and starts the pinned job under `/heocr` with inputs in `in/`. Write each expected snapshot to a temporary name and atomically rename it to the declared filename in `out/` once complete. Each declared snapshot is immutable after rename and has its own size limit. The supervisor commits snapshots as they become available, each alongside a checksum receipt under `runs/<run-id>/`. The final receipt records success only when the trainer exits cleanly and all snapshots are committed. Trainer logs and training data stay off the output repository.
