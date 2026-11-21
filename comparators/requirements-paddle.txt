@@ -1,0 +1,10 @@
+flatbuffers==25.12.19
+numpy==2.5.5
+onnxruntime==1.32.0
+opencv-python==5.1.0.95
+packaging==26.3
+paddleocr-hebrew @ git+https://github.com/RivoksLab/paddleocr-hebrew.git@3baae91ad6479ef0473f901b4ed96366ae6c1670
+pillow==13.0.0
+protobuf==7.36.2
+pyclipper==1.4.0
+pypdfium2==5.15.2
