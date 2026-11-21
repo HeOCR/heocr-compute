@@ -1,5 +1,6 @@
 """Offline tests for autonomous training and its publication boundary."""
 import contextlib
+import datetime as dt
 import io
 import json
 import os
@@ -12,9 +13,10 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from heocr_compute.remote import hf_job, hf_train, hf_train_pod, profiles
+from heocr_compute.remote.api import RunPodError
 from heocr_compute.remote.ledger import Ledger
 from heocr_compute.remote.policy import Policy, Refused
-from heocr_compute.remote.runner import sweep
+from heocr_compute.remote.runner import Runner, sweep
 
 
 class HfTrainTest(unittest.TestCase):
@@ -43,6 +45,7 @@ class HfTrainTest(unittest.TestCase):
         self.api.cpu_price_per_vcpu.return_value = 0.05
         self.api.balance.return_value = 100
         self.api.create_pod.return_value = {"id": "pod-example", "cost": 0.1}
+        self.api.pod_startup_state.return_value = "running"
 
     def write_job(self):
         raw = json.dumps(self.job).encode()
@@ -69,7 +72,87 @@ class HfTrainTest(unittest.TestCase):
         self.assertNotIn("registry", body)
         self.assertNotIn("RUNPOD_SECRET", stdout.getvalue())
         self.assertIn("autonomous", self.ledger.events()[0])
-        self.assertEqual([e["event"] for e in self.ledger.events()], ["reserve", "pod"])
+        self.assertEqual([e["event"] for e in self.ledger.events()], ["reserve", "pod", "startup"])
+        self.api.pod_startup_state.assert_called_once_with("pod-example")
+        self.api.terminate.assert_not_called()
+
+    def launch_with_clock(self, state):
+        clock = dt.datetime(2099, 1, 1, tzinfo=dt.timezone.utc)
+
+        def now():
+            return clock
+
+        def sleep(seconds):
+            nonlocal clock
+            clock += dt.timedelta(seconds=seconds)
+
+        self.ledger.now = now
+        self.args.startup_minutes = 0.25
+        self.api.pod_startup_state.side_effect = state
+        runner = Runner(self.api, self.ledger, now=now, sleep=sleep)
+        with patch.object(hf_train, "Runner", return_value=runner), patch.object(
+                Policy, "load", return_value=Policy()), contextlib.redirect_stdout(io.StringIO()):
+            return hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger)
+
+    def test_startup_timeout_terminates_exact_pod_and_waits_for_billing(self):
+        self.api.get_pod.return_value = None
+        self.api.billed_usd.return_value = None
+        with self.assertRaisesRegex(ValueError, "terminated after its startup deadline"):
+            self.launch_with_clock(["pending", "pending", "pending"])
+        self.assertEqual(self.api.pod_startup_state.call_count, 3)
+        self.api.terminate.assert_called_once_with("pod-example")
+        run, = self.ledger.runs().values()
+        self.assertEqual(run["reserve"]["startup_deadline_utc"], "2099-01-01T00:00:15+00:00")
+        self.assertEqual(run["startup"]["date"], run["reserve"]["startup_deadline_utc"])
+        self.assertEqual(run["startup"]["status"], "startup_timeout")
+        self.assertNotIn("final", run)
+        self.api.list_pods.return_value = []
+        self.api.billed_usd.return_value = 0.013
+        self.assertEqual(sweep(self.api, self.ledger, now=self.ledger.now, out=lambda _: None), [])
+        final = self.ledger.runs()[run["run_id"]]["final"]
+        self.assertEqual((final["status"], final["usd"]), ("startup_timeout", 0.013))
+
+    def test_started_pod_is_kept_after_pending_and_unknown_observations(self):
+        self.assertEqual(self.launch_with_clock(["pending", RunPodError("unavailable"), "running"]), 0)
+        self.api.terminate.assert_not_called()
+        run, = self.ledger.runs().values()
+        self.assertEqual(run["startup"]["status"], "running")
+
+    def test_startup_telemetry_error_is_not_evidence_to_delete(self):
+        with self.assertRaisesRegex(ValueError, "startup could not be verified"):
+            self.launch_with_clock(["pending", "pending", RunPodError("unavailable")])
+        self.api.terminate.assert_not_called()
+        run, = self.ledger.runs().values()
+        self.assertNotIn("startup", run)
+
+    def test_pod_that_exits_before_first_observation_can_still_be_collected(self):
+        self.assertEqual(self.launch_with_clock(["gone"]), 0)
+        self.api.terminate.assert_not_called()
+
+    def test_sweep_recovers_expired_startup_watch(self):
+        now = dt.datetime(2099, 1, 1, 1, tzinfo=dt.timezone.utc)
+        self.ledger.now = lambda: now
+        run_id = "20990101-004000-abcd"
+        self.ledger.reserve(run_id, autonomous=True, usd_est=0.5, pod_type="smoke",
+                            deadman_utc="2099-01-01T02:00:00+00:00",
+                            startup_deadline_utc="2099-01-01T00:55:00+00:00")
+        self.ledger.pod(run_id, pod_id="pod-example", created_utc="2099-01-01T00:40:00+00:00")
+        self.api.list_pods.return_value = [{"id": "pod-example", "name": "heocr-hf-" + run_id},
+                                          {"id": "other-pod", "name": "heocr-hf-20990101-004000-abce"}]
+        self.api.get_pod.return_value = None
+        self.api.pod_startup_state.return_value = "pending"
+        self.api.billed_usd.return_value = 0.02
+        self.assertEqual(sweep(self.api, self.ledger, dry_run=True, now=lambda: now, out=lambda _: None), [])
+        self.api.terminate.assert_not_called()
+        self.assertEqual(sweep(self.api, self.ledger, now=lambda: now, out=lambda _: None), ["pod-example"])
+        self.api.terminate.assert_called_once_with("pod-example")
+        self.assertEqual(self.ledger.runs()[run_id]["final"]["usd"], 0.02)
+
+    def test_startup_minutes_cannot_exceed_quoted_allowance(self):
+        self.args.startup_minutes = 16
+        with self.assertRaisesRegex(ValueError, "startup allowance"):
+            hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger)
+        self.api.create_pod.assert_not_called()
 
     def test_registry_credential_is_passed_to_provider_for_private_image(self):
         self.args.registry_auth_id = "registry-fixture"

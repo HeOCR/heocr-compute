@@ -109,6 +109,52 @@ class ErrorDetailTest(unittest.TestCase):
         self.assertNotIn("invented-key", str(cm.exception))
 
 
+class PodStartupTelemetryTest(unittest.TestCase):
+    def test_selects_runtime_and_desired_status_from_same_snapshot(self):
+        for status, runtime, expected in (
+            ("RUNNING", None, "pending"),
+            ("RUNNING", {"uptimeInSeconds": 0}, "running"),
+            ("EXITED", {"uptimeInSeconds": 1234}, "stopped"),
+        ):
+            with self.subTest(status=status, runtime=runtime):
+                def transport(method, url, headers, body, *, timeout):
+                    self.assertTrue(url.endswith("/graphql"))
+                    self.assertEqual(method, "POST")
+                    self.assertEqual(timeout, 8)
+                    request = json.loads(body)
+                    self.assertEqual(request["variables"], {"podId": "example"})
+                    self.assertIn("runtime { uptimeInSeconds }", request["query"])
+                    return 200, json.dumps({"data": {"pod": {
+                        "id": "example", "desiredStatus": status, "runtime": runtime,
+                    }}}).encode()
+                client = RunPod("invented-key", transport=transport, sleep=lambda _: None)
+                self.assertEqual(client.pod_startup_state("example"), expected)
+
+    def test_incomplete_telemetry_is_an_error_and_is_redacted(self):
+        missing = {"data": {"pod": {"id": "example", "desiredStatus": "RUNNING"}}}
+        partial = {"data": {"pod": {"id": "example", "desiredStatus": "RUNNING", "runtime": None}},
+                   "errors": [{"message": "invented sensitive diagnostic"}]}
+        for reply in (missing, partial):
+            def transport(*args, **kwargs):
+                return 200, json.dumps(reply).encode()
+            with self.assertRaisesRegex(RunPodError, "^could not verify pod startup telemetry$"):
+                RunPod("invented-key", transport=transport).pod_startup_state("example")
+
+    def test_missing_graphql_pod_needs_rest_confirmation(self):
+        for rest_status in (200, 404):
+            def transport(method, url, headers, body, *, timeout):
+                if method == "POST":
+                    return 200, b'{"data": {"pod": null}}'
+                self.assertTrue(url.endswith("/v2/pods/example"))
+                return rest_status, b'{"id": "example"}'
+            client = RunPod("invented-key", transport=transport)
+            if rest_status == 404:
+                self.assertEqual(client.pod_startup_state("example"), "gone")
+            else:
+                with self.assertRaises(RunPodError):
+                    client.pod_startup_state("example")
+
+
 class PerAccountLedgerTest(unittest.TestCase):
     def test_only_this_accounts_runs_count(self):
         now = dt.datetime(2026, 11, 18, 15, 0, tzinfo=dt.timezone.utc)

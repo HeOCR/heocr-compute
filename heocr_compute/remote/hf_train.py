@@ -13,10 +13,40 @@ from types import SimpleNamespace
 from . import budget, hf_job
 from .api import RunPodError, load_hf_token
 from .policy import Policy, Refused
-from .runner import Runner, new_run_id, pod_name, terminate_confirmed
+from .runner import (Runner, new_run_id, observe_startup, pod_name, reconcile_startup_cost, record_startup,
+                     terminate_confirmed)
 
 PROFILE_MARKER = "hf"
 KRAKEN_TRAIN_IMAGE = "ghcr.io/heocr/heocr-compute-kraken-train@"
+STARTUP_POLL_SECONDS = 10
+
+
+def watch_startup(runner, run_id, pod_id, deadline):
+    """Monitor provisioning from the account side until the pod starts or the wait expires."""
+    while True:
+        expired = runner.now() >= deadline
+        state = observe_startup(runner.api, pod_id)
+        if state == "running":
+            record_startup(runner.ledger, run_id, pod_id, state=state)
+            print(f"Pod {pod_id} will pull verified inputs and publish results without a local supervisor.")
+            return 0
+        if state == "gone":
+            print(f"Pod {pod_id} already left the account. Use collect-hf to check for a receipt.")
+            return 0
+        if expired:
+            break
+        remaining = (deadline - runner.now()).total_seconds()
+        if remaining > 0:
+            runner.sleep(min(remaining, STARTUP_POLL_SECONDS))
+    if state == "unknown":
+        raise ValueError(f"pod {pod_id} startup could not be verified; check Runpod or run heocr-remote sweep")
+    if not terminate_confirmed(runner.api, pod_id, sleep=runner.sleep):
+        raise ValueError(f"pod {pod_id} missed its startup deadline and teardown was not confirmed")
+    record_startup(runner.ledger, run_id, pod_id, state="startup_timeout")
+    run = runner.ledger.runs()[run_id]
+    if not reconcile_startup_cost(runner.api, runner.ledger, run, now=runner.now):
+        print("Provider billing is pending. The estimate remains reserved until a later sweep.")
+    raise ValueError(f"pod {pod_id} was terminated after its startup deadline without a container runtime")
 
 
 def launch(a, profile, api, ledger):
@@ -39,6 +69,10 @@ def launch(a, profile, api, ledger):
                    "supply a Runpod managed registry credential ID")
     hf_job.require(all(math.isfinite(x) and x > 0 for x in (a.hours, a.run_cap, a.month_cap)),
                    "training time and cost caps must be finite and positive")
+    startup_limit = budget.STARTUP_HOURS * 60
+    startup_minutes = getattr(a, "startup_minutes", startup_limit)
+    hf_job.require(math.isfinite(startup_minutes) and 0 < startup_minutes <= startup_limit,
+                   "startup minutes must be positive and within the quoted startup allowance")
     policy = Policy.load()
     total = sum(item["size"] for item in job["inputs"])
     largest_snapshot = max(item["max_bytes"] for item in job["snapshots"])
@@ -66,9 +100,12 @@ def launch(a, profile, api, ledger):
             return 0
         if not a.yes and input(f"Start {profile.pod_type}, worst case USD {quote.usd_est:.2f}? [y/N] ").lower().strip() != "y":
             return 0
-        deadline = runner.now() + dt.timedelta(hours=a.hours)
+        reserved = runner.now()
+        deadline = reserved + dt.timedelta(hours=a.hours)
+        startup_deadline = min(deadline, reserved + dt.timedelta(minutes=startup_minutes))
         ledger.reserve(run_id, profile=profile.name, pod_type=profile.pod_type, usd_est=quote.usd_est,
-                       hours_max=quote.hours, deadman_utc=deadline.isoformat(), autonomous=True,
+                       hours_max=quote.hours, deadman_utc=deadline.isoformat(),
+                       startup_deadline_utc=startup_deadline.isoformat(), autonomous=True,
                        output=job["output"], job_sha256=a.approved_sha256, clean_sha256=job["clean_sha256"],
                        snapshots=job["snapshots"])
     env = {
@@ -100,8 +137,8 @@ def launch(a, profile, api, ledger):
     if type(rate) not in (float, int) or not math.isfinite(rate) or not 0 < rate <= quote.compute_usd_per_hour:
         terminate_confirmed(api, pod_id)
         raise ValueError("unverified or higher billed rate; reconcile the pod and reservation")
-    print(f"Pod {pod_id} will pull verified inputs and publish results without a local supervisor.")
-    return 0
+    print(f"Pod {pod_id} created. Waiting for container runtime until {startup_deadline.isoformat()}.", flush=True)
+    return watch_startup(runner, run_id, pod_id, startup_deadline)
 
 
 def validate_receipt(receipt, run_id, pod_id, reserve):

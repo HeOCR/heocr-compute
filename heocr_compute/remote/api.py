@@ -95,7 +95,8 @@ class RunPod:
     def __repr__(self):
         return "RunPod(key=<redacted>)"
 
-    def _call(self, method: str, path: str, body: dict | None = None, query: dict | None = None, ok=(200, 201, 204)):
+    def _call(self, method: str, path: str, body: dict | None = None, query: dict | None = None,
+              ok=(200, 201, 204), *, timeout: float | None = None, retries: int | None = None):
         url = API + path + ("?" + urllib.parse.urlencode(query) if query else "")
         headers = {"Authorization": f"Bearer {self._key}", "User-Agent": USER_AGENT,
                    "Accept": "application/json"}
@@ -104,9 +105,11 @@ class RunPod:
             headers["Content-Type"] = "application/json"
             data = json.dumps(body).encode()
         last = None
-        for attempt in range(self._retries):
+        attempts = self._retries if retries is None else retries
+        for attempt in range(attempts):
             try:
-                status, raw = self._transport(method, url, headers, data)
+                options = {} if timeout is None else {"timeout": timeout}
+                status, raw = self._transport(method, url, headers, data, **options)
             except OSError as e:  # network trouble: retry
                 last = RunPodError(f"{method} {path}: {type(e).__name__}")
                 self._sleep(2 ** attempt)
@@ -178,13 +181,45 @@ class RunPod:
         finally:
             self._retries = saved
 
-    def get_pod(self, pod_id: str) -> dict | None:
+    def get_pod(self, pod_id: str, **options) -> dict | None:
         try:
-            return self._call("GET", f"/v2/pods/{urllib.parse.quote(pod_id, safe='')}")
+            return self._call("GET", f"/v2/pods/{urllib.parse.quote(pod_id, safe='')}", **options)
         except RunPodError as e:
             if e.status == 404:
                 return None
             raise
+
+    def pod_startup_state(self, pod_id: str) -> str:
+        """Read runtime and desired status from the same GraphQL snapshot."""
+        query = ("query Startup($podId: String!) { pod(input: {podId: $podId}) "
+                 "{ id desiredStatus runtime { uptimeInSeconds } } }")
+        try:
+            result = self._call("POST", "/graphql", {"query": query, "variables": {"podId": pod_id}},
+                                timeout=8, retries=1)
+            if result.get("errors"):
+                raise ValueError
+            pod = result["data"]["pod"]
+            if pod is None:
+                if self.get_pod(pod_id, timeout=8, retries=1) is None:
+                    return "gone"
+                raise ValueError
+            if pod["id"] != pod_id:
+                raise ValueError
+            status = pod["desiredStatus"]
+            if status in ("EXITED", "TERMINATED"):
+                return "stopped"
+            if status == "RUNNING":
+                runtime = pod["runtime"]
+                if runtime is None:
+                    return "pending"
+                uptime = runtime["uptimeInSeconds"]
+                if type(uptime) is int and uptime >= 0:
+                    return "running"
+        except RunPodError as error:
+            raise RunPodError("could not query pod startup telemetry", error.status) from None
+        except (AttributeError, KeyError, TypeError, ValueError):
+            pass
+        raise RunPodError("could not verify pod startup telemetry") from None
 
     def list_pods(self) -> list[dict]:
         pods, cursor = [], None
