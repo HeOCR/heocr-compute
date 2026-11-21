@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import budget, manifest, profiles, render_job
+from .api import RunPodError
 from .policy import Policy
 from .ledger import Ledger, utcnow
 from .ssh import Remote, SSHError, public_key
@@ -179,6 +180,45 @@ def terminate_confirmed(api, pod_id: str, sleep=time.sleep, attempts: int = 6) -
     return False
 
 
+def observe_startup(api, pod_id: str) -> str:
+    try:
+        return api.pod_startup_state(pod_id)
+    except RunPodError:
+        return "unknown"
+
+
+def record_startup(ledger: Ledger, run_id: str, pod_id: str, *, state: str) -> None:
+    with ledger.locked():
+        run = ledger.runs()[run_id]
+        if not any(key in run for key in ("startup", "final")):
+            ledger.append({"event": "startup", "run_id": run_id, "pod_id": pod_id, "status": state})
+
+
+def reconcile_startup_cost(api, ledger: Ledger, run: dict, now=utcnow) -> bool:
+    """Settle a confirmed startup timeout only against positive provider billing."""
+    event = run.get("startup", {})
+    reserve = run.get("reserve", {})
+    if ("final" in run or event.get("status") != "startup_timeout"
+            or reserve.get("account") != ledger.account):
+        return False
+    pod_id = event["pod_id"]
+    created = run.get("pod", {}).get("created_utc") or reserve["date"]
+    try:
+        usd = api.billed_usd(pod_id, created, now().isoformat())
+    except (RunPodError, ValueError, TypeError):
+        return False
+    if type(usd) not in (int, float) or not math.isfinite(usd) or usd <= 0:
+        return False
+    ended_at = _parse_ts(event["date"])
+    created_at = _parse_ts(created) or _parse_ts(reserve["date"])
+    hours = max(0, (ended_at - created_at).total_seconds() / 3600)
+    with ledger.locked():
+        if "final" not in ledger.runs()[run["run_id"]]:
+            ledger.final(run["run_id"], pod_type=reserve["pod_type"], hours=hours, usd=usd,
+                         status="startup_timeout", pod_id=pod_id, usd_source="provider_billing")
+    return True
+
+
 def sweep(api, ledger: Ledger, *, everything: bool = False, dry_run: bool = False, now=utcnow,
           pid_alive=_pid_alive, out=print, sleep=time.sleep) -> list[str]:
     """Terminate heocr pods with no live runner: finished, past their deadline, or unknown here."""
@@ -193,6 +233,8 @@ def sweep(api, ledger: Ledger, *, everything: bool = False, dry_run: bool = Fals
         r = runs.get(rid) if rid else None
         res = (r or {}).get("reserve") or {}
         deadline = _parse_ts(res.get("deadman_utc"))
+        startup_deadline = _parse_ts(res.get("startup_deadline_utc"))
+        startup_timeout = False
         if everything:
             why = "--all"
         elif r is None:
@@ -204,6 +246,18 @@ def sweep(api, ledger: Ledger, *, everything: bool = False, dry_run: bool = Fals
             why = "its run already finished"
         elif deadline and now() > deadline:
             why = "past its deadline"
+        elif (res.get("autonomous") and res.get("account") == ledger.account and startup_deadline
+              and now() >= startup_deadline and "startup" not in r
+              and (r.get("pod") or {}).get("pod_id") == pod["id"]):
+            state = observe_startup(api, pod["id"])
+            if state == "running" and not dry_run:
+                record_startup(ledger, rid, pod["id"], state=state)
+            if state == "unknown":
+                out(f"sweep: startup telemetry unavailable for pod {pod['id']}; verify provider state")
+            if state not in ("pending", "stopped"):
+                continue
+            why = "no container runtime by its startup deadline"
+            startup_timeout = True
         elif not res.get("autonomous") and res.get("host") == host and not pid_alive(res.get("pid", -1)):
             why = "its runner is gone"
         else:
@@ -216,12 +270,17 @@ def sweep(api, ledger: Ledger, *, everything: bool = False, dry_run: bool = Fals
             out(f"sweep: POD {pod['id']} IS STILL RUNNING: terminate it in the RunPod console")
             continue
         killed.append(pod["id"])
-        if rid and r is not None and "final" not in r:
+        if startup_timeout:
+            record_startup(ledger, rid, pod["id"], state="startup_timeout")
+        elif rid and r is not None and "final" not in r:
             created = _parse_ts(pod.get("createdAt")) or _parse_ts(res.get("date")) or now()
             secs = max(0.0, (now() - created).total_seconds())
             rate = float(pod.get("cost") or (r.get("pod") or {}).get("usd_per_hr") or 0)
             ledger.final(rid, pod_type=res.get("pod_type", "?"), hours=secs / 3600,
                          usd=budget.billed(rate, secs), status="swept", pod_id=pod["id"])
+    if not dry_run:
+        for run in ledger.runs().values():
+            reconcile_startup_cost(api, ledger, run, now=now)
     return killed
 
 
