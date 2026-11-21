@@ -9,7 +9,7 @@ from unittest import mock
 
 from heocr_compute.remote import budget, manifest, profiles, runner
 from heocr_compute.remote.ledger import Ledger
-from heocr_compute.remote.policy import Policy
+from heocr_compute.remote.policy import Policy, Refused
 from heocr_compute.remote.runner import Interrupted, Runner, Spec, sweep
 from heocr_compute.remote.ssh import SSHError
 
@@ -49,7 +49,7 @@ class FakeAPI:
         self.created.append(body)
         pid = f"pod{len(self.created)}"
         self.pods[pid] = {"id": pid, "name": body["name"], "cost": self.cost, "status": self.status,
-                          "createdAt": NOW.isoformat()}
+                          "createdAt": NOW.isoformat(), "cpu": body.get("cpu"), "gpu": body.get("gpu")}
         return dict(self.pods[pid])
 
     def get_pod(self, pid):
@@ -58,7 +58,7 @@ class FakeAPI:
             return None
         return {**p, "ssh": {"direct": {"host": "h", "port": 22, "username": "root"}}}
 
-    def list_pods(self):
+    def list_pods(self, *, include_cluster_pods=False):
         return [dict(p) for p in self.pods.values()]
 
     def terminate(self, pid):
@@ -197,6 +197,56 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(f["pod_type"], "cpu3cx2")
         self.assertGreater(f["usd"], 0)
         self.assertEqual(self.ledger.month_to_date()["open_estimate"], 0)
+
+    def test_cpu_launch_refuses_when_account_slots_are_full(self):
+        self.api.pods["existing"] = {"id": "existing", "name": "other-account-workload", "status": "PROVISIONING",
+                                     "cpu": {"vcpuCount": 64}, "runtime": None}
+        runner = self.make(None)
+        self.assertEqual(runner.run(self.spec(dry_run=True))["status"], "dry_run")
+        with self.assertRaisesRegex(Refused, "requested 2 vCPUs, 0 of 64 available"):
+            runner.run(self.spec())
+        self.assertEqual(self.api.created, [])
+        self.assertEqual(self.api.terminated, [])
+        self.assertEqual(self.ledger.events(), [])
+
+    def test_unconfirmed_cpu_reservations_hold_slots_until_the_pod_is_listed(self):
+        run_id = "20261118-120000-abcd"
+        self.ledger.account = "example"
+        self.ledger.reserve(run_id, profile="cpu", pod_type="cpu3cx32", usd_est=0.5, autonomous=True)
+        self.ledger.reserve("other", account="other", profile="cpu", vcpus=32, usd_est=0.5)
+        self.api.pods["busy"] = {"id": "busy", "name": "busy", "status": "RUNNING", "cpu": {"vcpuCount": 32}}
+        self.api.pods["gpu"] = {"id": "gpu", "name": "gpu", "status": "STARTING", "gpu": {"vcpuCount": 32}}
+        self.api.pods["stopped"] = {"id": "stopped", "name": "stopped", "status": "EXITED"}
+        runner = self.make(None)
+        with self.ledger.locked(), self.assertRaisesRegex(Refused, "32 in pods, 32 in unconfirmed reservations"):
+            runner.require_cpu_capacity(profiles.PROFILES["cpu"])
+        self.api.pods["busy"]["name"] = "heocr-hf-" + run_id
+        with self.ledger.locked():
+            runner.require_cpu_capacity(profiles.PROFILES["cpu"])
+
+    def test_missing_pod_is_rechecked_by_exact_id(self):
+        self.ledger.reserve("existing", profile="cpu", vcpus=32, usd_est=0.5)
+        self.ledger.pod("existing", pod_id="unlisted")
+        self.api.pods["unlisted"] = {"id": "unlisted", "name": "unlisted", "status": "STARTING",
+                                     "cpu": {"vcpuCount": 32}}
+        self.api.list_pods = mock.Mock(return_value=[])
+        runner = self.make(None)
+        full_size = profiles.PROFILES["cpu"].sized(vcpus=64)
+        with self.ledger.locked(), self.assertRaisesRegex(Refused, "32 of 64 available"):
+            runner.require_cpu_capacity(full_size)
+        self.api.pods.pop("unlisted")
+        with self.ledger.locked():
+            runner.require_cpu_capacity(full_size)
+        self.api.list_pods.assert_called_with(include_cluster_pods=True)
+
+    def test_unverifiable_pod_blocks_cpu_but_not_gpu_admission(self):
+        self.api.pods["unknown"] = {"id": "unknown", "name": "unknown", "status": "RUNNING",
+                                     "cpu": {"vcpuCount": True}}
+        runner = self.make(None)
+        with self.ledger.locked():
+            runner.require_cpu_capacity(profiles.PROFILES["gpu"])
+            with self.assertRaisesRegex(Refused, "verifiable RunPod compute type and vCPU count"):
+                runner.require_cpu_capacity(profiles.PROFILES["cpu"])
 
     def test_deadman_armed_and_reported(self):
         remote = FakeRemote(dict(OUT))

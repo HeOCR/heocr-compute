@@ -44,6 +44,7 @@ class HfTrainTest(unittest.TestCase):
         self.api.cpu_vcpu_range.return_value = (2, 32)
         self.api.cpu_price_per_vcpu.return_value = 0.05
         self.api.balance.return_value = 100
+        self.api.list_pods.return_value = []
         self.api.create_pod.return_value = {"id": "pod-example", "cost": 0.1}
         self.api.pod_startup_state.return_value = "running"
 
@@ -72,6 +73,7 @@ class HfTrainTest(unittest.TestCase):
         self.assertNotIn("registry", body)
         self.assertNotIn("RUNPOD_SECRET", stdout.getvalue())
         self.assertIn("autonomous", self.ledger.events()[0])
+        self.assertEqual(self.ledger.events()[0]["vcpus"], 2)
         self.assertEqual([e["event"] for e in self.ledger.events()], ["reserve", "pod", "startup"])
         self.api.pod_startup_state.assert_called_once_with("pod-example")
         self.api.terminate.assert_not_called()
@@ -224,10 +226,22 @@ class HfTrainTest(unittest.TestCase):
         with patch.object(Policy, "load", return_value=Policy()), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger), 0)
         self.api.create_pod.assert_not_called()
+        self.api.list_pods.assert_not_called()
         self.assertEqual(self.ledger.events(), [])
         denied = Policy(deny_hashes=frozenset([self.job["inputs"][0]["sha256"]]))
         with patch.object(Policy, "load", return_value=denied), self.assertRaises(Refused):
             hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger)
+
+    def test_cpu_admission_refuses_before_reserving_or_creating(self):
+        self.api.list_pods.return_value = [
+            {"id": "example-busy", "name": "other-workload", "status": "STARTING", "cpu": {"vcpuCount": 64}},
+        ]
+        with patch.object(Policy, "load", return_value=Policy()), contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaisesRegex(Refused, "requested 2 vCPUs, 0 of 64 available"):
+            hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger)
+        self.api.create_pod.assert_not_called()
+        self.api.terminate.assert_not_called()
+        self.assertEqual(self.ledger.events(), [])
 
     def test_offline_runner_is_not_an_orphan(self):
         name = "heocr-hf-20990101-000000-abcd"
