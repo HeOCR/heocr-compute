@@ -11,6 +11,10 @@ Python 3.11 or later. The core runner uses the standard library. The optional li
 See [autonomous private Hub training](docs/autonomous-hf-training.md) for approved jobs that pull inputs on the pod and return snapshots through the private Hub.
 
 For comparator containers, see the [image digests, licences, and corresponding source](comparators/IMAGES.md#licences-and-source).
+The Kraken and TrOCR images **contain non-open-source but redistributable components**.
+Their Linux AMD64 PyTorch CPU wheel bundles Intel oneMKL under the
+[Intel Simplified Software License (ISSL)](https://www.intel.com/content/dam/develop/external/us/en/documents/pdf/intel-simplified-software-license.pdf).
+See the [image NOTICE](docker/comparators/NOTICE) for the bundled component disclosure.
 
 ```sh
 pip install .
