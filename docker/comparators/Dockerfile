@@ -65,19 +65,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2
 COPY --from=paddle-build /opt/paddle /opt/paddle
 ENV PATH="/opt/paddle/bin:$PATH"
 
-FROM scratch AS onemkl-licence
-ADD --checksum=sha256:4cdde91f2964f3473f4534accd4c2288ffcd8c2ee73318827acf586b9bb63839 \
-    https://www.intel.com/content/dam/develop/external/us/en/documents/pdf/intel-simplified-software-license.pdf /Intel-Simplified-Software-License.pdf
-
 FROM runtime AS kraken
-COPY --from=onemkl-licence /Intel-Simplified-Software-License.pdf /usr/share/doc/heocr-comparator/
+LABEL org.opencontainers.image.description="Kraken comparator runtime. Contains non-open-source but redistributable components."
+COPY docker/comparators/licenses/Intel-Simplified-Software-License.pdf /usr/share/doc/heocr-comparator/
 COPY comparators/kraken_runner.py comparators/raw_output.py comparators/requirements-kraken-linux-amd64.txt ./
 RUN python -m pip install --only-binary=:all: --extra-index-url https://download.pytorch.org/whl/cpu \
     -r requirements-kraken-linux-amd64.txt && python -m pip check
 ENTRYPOINT ["/bin/sh", "/opt/comparators/entrypoint.sh", "/opt/comparators/kraken_runner.py"]
 
 FROM adapter AS trocr
-COPY --from=onemkl-licence /Intel-Simplified-Software-License.pdf /usr/share/doc/heocr-comparator/
+LABEL org.opencontainers.image.description="TrOCR comparator runtime. Contains non-open-source but redistributable components."
+COPY docker/comparators/licenses/Intel-Simplified-Software-License.pdf /usr/share/doc/heocr-comparator/
 ENV TOKENIZERS_PARALLELISM=false
 COPY comparators/trocr.py comparators/requirements-trocr-linux-amd64.txt ./
 RUN python -m pip install --only-binary=:all: --extra-index-url https://download.pytorch.org/whl/cpu \
