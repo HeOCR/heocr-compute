@@ -1,0 +1,57 @@
+name: Kraken training image
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/kraken-train-image.yml'
+      - 'comparators/requirements-kraken-linux-amd64.txt'
+      - 'docker/build-kraken-train-image.sh'
+      - 'docker/comparators/**'
+      - 'docker/hf-train-entrypoint.sh'
+      - 'heocr_compute/**'
+      - 'pyproject.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: bash docker/build-kraken-train-image.sh kraken-train:ci
+
+  publish:
+    if: github.repository == 'HeOCR/heocr-compute' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/heocr/heocr-compute-kraken-train
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build and check
+        run: bash docker/build-kraken-train-image.sh kraken-train:ci
+      - name: Publish checked image and verify its digest
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          tag="$IMAGE:sha-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker tag kraken-train:ci "$tag"
+          docker push "$tag"
+          digest="$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          pinned="$IMAGE@$digest"
+          docker pull --platform linux/amd64 "$pinned"
+          test "$(docker image inspect --format '{{.Id}}' "$pinned")" = "$(docker image inspect --format '{{.Id}}' kraken-train:ci)"
+          printf 'Kraken training image: `%s`\n\nSource revision: `%s`\n' "$pinned" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"

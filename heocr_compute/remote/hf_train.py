@@ -16,6 +16,7 @@ from .policy import Policy, Refused
 from .runner import Runner, new_run_id, pod_name, terminate_confirmed
 
 PROFILE_MARKER = "hf"
+KRAKEN_TRAIN_IMAGE = "ghcr.io/heocr/heocr-compute-kraken-train@"
 
 
 def launch(a, profile, api, ledger):
@@ -25,6 +26,12 @@ def launch(a, profile, api, ledger):
     except OSError:
         raise ValueError("could not read the approved training job file") from None
     job = hf_job.parse(raw, a.approved_sha256)
+    repo_scope = getattr(a, "hf_repo_scope", None)
+    if job["image"].startswith(KRAKEN_TRAIN_IMAGE):
+        hf_job.require(repo_scope is not None, "Kraken training image requires --hf-repo-scope")
+        hf_job.require(profile.kind == "cpu", "Kraken training image requires a CPU profile")
+    if repo_scope is not None:
+        hf_job.check_repo_scope(job, repo_scope)
     hf_job.require(profile.cloud == "SECURE", "training requires a Secure Cloud profile")
     hf_job.require(hf_job.matches(hf_job.SECRET, a.hf_secret), "supply the name of a Runpod secret")
     registry = getattr(a, "registry_auth_id", None)
@@ -71,6 +78,8 @@ def launch(a, profile, api, ledger):
         "HEOCR_HF_DEADLINE": str(int(deadline.timestamp())),
         "HEOCR_HF_TOKEN": "{{ RUNPOD_SECRET_" + a.hf_secret + " }}",
     }
+    if repo_scope is not None:
+        env["HEOCR_HF_REPO_SCOPE"] = repo_scope
     body = profile.body(name, env)
     body.update(image=job["image"], ports=[], startSsh=False)
     if registry is not None:

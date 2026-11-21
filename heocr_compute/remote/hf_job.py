@@ -98,6 +98,14 @@ def parse(raw, approved):
     return job
 
 
+def check_repo_scope(job, repo):
+    """Require every Hub operation in a job to use one operator-approved dataset."""
+    require(matches(REPO, repo), "training worker requires one approved HeOCR dataset")
+    require(all(record["repo"] == repo and record["type"] == "dataset"
+                for record in (*job["inputs"], job["output"])),
+            "job is outside its approved Hub dataset scope")
+
+
 def verify_file(path, size, sha256):
     require(path.is_file() and path.stat().st_size == size
             and manifest.sha256_file(path) == sha256, "artifact size or SHA-256 mismatch")

@@ -98,11 +98,14 @@ def main():
     signal.signal(signal.SIGTERM, interrupt)
     try:
         os.umask(0o077)
-        root = Path("/heocr")
-        root.mkdir(mode=0o700, exist_ok=True)
         raw = os.environ.pop("HEOCR_HF_JOB").encode("utf-8")
         spec_sha = os.environ["HEOCR_HF_JOB_SHA256"]
         job = hf_job.parse(raw, spec_sha)
+        repo_scope = os.environ.get("HEOCR_HF_REPO_SCOPE")
+        if repo_scope is not None or os.environ.get("HEOCR_HF_REQUIRE_REPO_SCOPE") == "1":
+            hf_job.check_repo_scope(job, repo_scope)
+        root = Path("/heocr")
+        root.mkdir(mode=0o700, exist_ok=True)
         run_id = os.environ["HEOCR_HF_RUN_ID"]
         hf_job.require(hf_job.matches(hf_job.RUN_ID, run_id), "invalid run ID")
         started = dt.datetime.now(dt.timezone.utc).isoformat()

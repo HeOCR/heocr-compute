@@ -67,3 +67,9 @@ Collection pins the current private output revision once, checks the run and job
 The [Publish training worker workflow](../.github/workflows/publish-training-image.yml) builds the Linux AMD64 worker from main and publishes it as `ghcr.io/heocr/heocr-compute-train:sha-<commit>`. Its job output and summary give the image reference by digest for the job spec. The build context contains only the committed launcher code, package metadata and worker build files.
 
 GitHub gives the first package version private visibility. After the first push, a HeOCR package administrator sets `heocr-compute-train` to Public. The workflow uses the repository's automatic token for the push, then verifies an anonymous pull of the digest with a clean Docker configuration. Repeat that check after the one-time visibility change. [GitHub Container registry visibility](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
+
+### Kraken CPU worker
+
+The [Kraken training image workflow](../.github/workflows/kraken-train-image.yml) builds the Linux AMD64 image and runs an offline one-epoch smoke on invented lines. After review, dispatch the workflow on `main` to publish the checked image and obtain its digest. The worker uses the same pinned Kraken 7.2 and CPU PyTorch dependencies as the Linux comparator, with the autonomous supervisor as its entrypoint.
+
+Pin the published digest in the job specification. Use `--profile cpu` and pass `--hf-repo-scope` with the single private dataset approved for the job. All input pins and the snapshot destination must be in that dataset. Use a managed Hub token scoped to read and write that exact dataset. The launcher checks the scope before reserving budget, and the worker checks it again before any Hub access. For a private image, pass the approved Runpod registry credential ID as described above.
