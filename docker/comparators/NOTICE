@@ -1,0 +1,18 @@
+HeOCR comparator runner images
+==============================
+
+These images provide comparator infrastructure for evaluation.
+
+Kraken and TrOCR contain non-open-source but redistributable components:
+
+* Intel(R) oneAPI Math Kernel Library (oneMKL), bundled in the Linux AMD64
+  PyTorch 2.14.0+cpu wheel. Copyright (c) Intel Corporation.
+  Intel Simplified Software License (ISSL):
+  https://www.intel.com/content/dam/develop/external/us/en/documents/pdf/intel-simplified-software-license.pdf
+  Intel's redistribution guidance:
+  https://www.intel.com/content/www/us/en/developer/articles/tool/onemkl-license-faq.html
+  A copy of the ISSL is included alongside this notice in those two images.
+
+See the upstream dependency notices shipped with the installed packages.
+For other software licences and corresponding source, see:
+https://github.com/HeOCR/heocr-compute/blob/main/comparators/IMAGES.md#licences-and-source

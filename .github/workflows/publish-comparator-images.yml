@@ -37,6 +37,12 @@ jobs:
             --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" "$context"
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$local_image")" = linux/amd64
+          docker run --rm --network none --entrypoint cat "$local_image" \
+            /usr/share/doc/heocr-comparator/NOTICE | cmp - "$context/docker/comparators/NOTICE"
+          if [[ "$TARGET" == kraken || "$TARGET" == trocr ]]; then
+            docker run --rm --network none --entrypoint test "$local_image" \
+              -s /usr/share/doc/heocr-comparator/Intel-Simplified-Software-License.pdf
+          fi
           docker run --rm --network none "$local_image" --help >/dev/null
           if output="$(docker run --rm --network none -e HEOCR_HF_JOB='{}' \
             -e HEOCR_HF_DEADLINE=invalid "$local_image" 2>&1)"; then

@@ -7,12 +7,12 @@ job summary records the immutable `ghcr.io/...@sha256:...` reference, checked
 by pulling it back, and the source revision. Use that reference in the run
 record. A tag identifies the build and may change.
 
-| Image suffix | Runner | Model argument |
-|---|---|---|
-| `tesseract` | Tesseract 5.5.3 | `best`, `fast`, `rivok-full`, `rivok-lite` |
-| `paddle` | Rivok Paddle ONNX | `paddle` |
-| `kraken` | Kraken 7.2 | `ppocrv6-small`, `biblia-general`, `biblia-ashkenazi`, `biblia-italian`, `biblia-sephardi` |
-| `trocr` | TrOCR-style CPU candidate | `trocr-s44` (line input) |
+| Image suffix | Runner | Model argument | Redistribution notice |
+|---|---|---|---|
+| `tesseract` | Tesseract 5.5.3 | `best`, `fast`, `rivok-full`, `rivok-lite` | — |
+| `paddle` | Rivok Paddle ONNX | `paddle` | — |
+| `kraken` | Kraken 7.2 | `ppocrv6-small`, `biblia-general`, `biblia-ashkenazi`, `biblia-italian`, `biblia-sephardi` | Contains non-open-source but redistributable components |
+| `trocr` | TrOCR-style CPU candidate | `trocr-s44` (line input) | Contains non-open-source but redistributable components |
 
 ## Verified pod image digests
 
@@ -55,8 +55,8 @@ invoke `python /opt/comparators/runner.py` (or `kraken_runner.py`) with the same
 arguments as above, using staged inputs and verified assets. The supervisor
 checks inputs and publishes declared snapshots, then attempts pod termination.
 
-Set `--registry-auth-id` on `heocr-remote hf-train` to the ID of the Runpod-managed
-registry credential with GHCR pull access. Use the approved image digest in the
+For a private registry image, set `--registry-auth-id` on `heocr-remote hf-train`
+to the ID of a Runpod-managed registry credential with pull access. Use the approved image digest in the
 job spec. Keep data transfer, budget and lifecycle on the authorized autonomous
 pod path. Eval freezes the applicable models, segmentation, order and scorer
 settings separately.
@@ -80,6 +80,9 @@ See the [HeOCR licence](../LICENSE) and [Dockerfile](../docker/comparators/Docke
 The recipe records the Python base digest and Debian snapshot. The Debian
 packages carry their copyright and licence files under `/usr/share/doc`.
 No HeOCR or comparator recognition checkpoints are copied into these images.
+Builds that include the [NOTICE](../docker/comparators/NOTICE) install it at
+`/usr/share/doc/heocr-comparator/NOTICE`. The Kraken and TrOCR builds also
+install a copy of Intel's ISSL in that directory.
 
 - The pod images include the unmodified Runpod CLI v3.1.1 executable under
   GPL-3.0. Its [corresponding source and build files](https://github.com/runpod/runpodctl/tree/72afce1305ad3a25217aafdb9022a16e9b569661)
@@ -91,7 +94,7 @@ No HeOCR or comparator recognition checkpoints are copied into these images.
   under Apache-2.0, and [ONNX Runtime](https://github.com/microsoft/onnxruntime/tree/v1.32.0)
   under MIT. The [OpenCV wheel's licence and source records](https://pypi.org/project/opencv-python/5.1.0.95/)
   cover its bundled FFmpeg (LGPL-2.1) and Qt (LGPL-3.0) binaries.
-- Keep Kraken and TrOCR private under the project’s open-licences-only policy.
-  Their exact Linux AMD64 PyTorch CPU wheel has `AT_MKL_ENABLED() == 1`, and
-  `libtorch_cpu.so` contains Intel oneMKL. Intel offers oneMKL under the
-  [Intel Simplified Software License](https://www.intel.com/content/www/us/en/developer/articles/tool/onemkl-license-faq.html).
+- Kraken and TrOCR **contain non-open-source but redistributable components**.
+  Intel oneMKL ships in the Linux AMD64 PyTorch 2.14.0+cpu wheel under the
+  [Intel Simplified Software License (ISSL)](https://www.intel.com/content/dam/develop/external/us/en/documents/pdf/intel-simplified-software-license.pdf).
+  Intel [permits redistribution in public containers](https://www.intel.com/content/www/us/en/developer/articles/tool/onemkl-license-faq.html).
