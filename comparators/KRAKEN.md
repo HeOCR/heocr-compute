@@ -1,14 +1,28 @@
 # Kraken candidate runners
 
-This is a candidate pipeline, not an approved evaluation configuration. The
-registered PP-OCRv6 asset is the [small model](https://zenodo.org/records/21788405)
-(Apache-2.0); the record calls it small but also contains contradictory medium
-wording. BiblIA [general](https://zenodo.org/records/5468286),
-[Ashkenazi](https://zenodo.org/records/5468478),
-[Italian](https://zenodo.org/records/5468573), and
-[Sephardi](https://zenodo.org/records/5468665) models each declare CC BY-SA 4.0.
-Rights, share-alike and applicable scripts require a decision before admission.
-Source and training exposure must be checked before any held-out use.
+All four BiblIA v1 models are admitted for historical handwriting comparison.
+In the project’s comparison workflow, running unmodified weights for scoring
+creates no derivative and does not apply share-alike to the results. Attribute
+each model used in the results. Download the weights from upstream and keep
+them out of redistributions. The BiblIA dataset is noncommercial and excluded
+from HeOCR training.
+
+Eval selects the general and applicable script-specific models for each set,
+records the selection in the roster amendment, and checks source exposure
+before held-out use. Eval also freezes the runtime and segmentation settings.
+
+| Asset | File | Licence | Attribution for results |
+|---|---|---|---|
+| BiblIA general v1 | `BiblIA_01.mlmodel` | CC BY-SA 4.0 | Daniel Stökl Ben Ezra, [Medieval Hebrew manuscripts version 1.0](https://doi.org/10.5281/zenodo.5468286) |
+| BiblIA Ashkenazi v1 | `Ashkenazi_01.mlmodel` | CC BY-SA 4.0 | Daniel Stökl Ben Ezra, [Medieval Hebrew manuscripts in Ashkenazi bookhand](https://doi.org/10.5281/zenodo.5468478) |
+| BiblIA Italian v1 | `Italian_01.mlmodel` | CC BY-SA 4.0 | Daniel Stökl Ben Ezra, [Medieval Hebrew manuscripts in Italian bookhand version 1.0](https://doi.org/10.5281/zenodo.5468573) |
+| BiblIA Sephardi v1 | `Sephardi_01.mlmodel` | CC BY-SA 4.0 | Daniel Stökl Ben Ezra, [Medieval Hebrew manuscripts in Sephardi bookhand version 1.0](https://doi.org/10.5281/zenodo.5468665) |
+| Kraken PP-OCRv6 small v1 | `small.safetensors` | Apache-2.0 | Benjamin Kiessling, [PP-OCRv6 (small) multilingual handwritten and printed text recognition model](https://doi.org/10.5281/zenodo.21788405) |
+| Kraken 7.2 bundled BLLA segmenter | `blla.mlmodel` | Apache-2.0 | Benjamin Kiessling, [General segmentation model for print and handwriting](https://doi.org/10.5281/zenodo.22879549) |
+
+Record the applicable licence, attribution, and SHA-256 from
+[`kraken_runner.py`](kraken_runner.py) in the run record. The PP-OCRv6 record
+has conflicting size wording. The pinned file is explicitly the small variant.
 
 With Python 3.12, create a dedicated venv and install
 `pip install -r comparators/requirements-kraken-macos-arm.txt`. It records the
@@ -18,8 +32,7 @@ hashes are not locked. Download `small.safetensors`, `BiblIA_01.mlmodel`,
 `Ashkenazi_01.mlmodel`, `Italian_01.mlmodel`, and `Sephardi_01.mlmodel` from
 the corresponding Zenodo records into an asset directory. The runner verifies
 weights against the digests in `kraken_runner.py`, and page mode verifies the
-Kraken 7.2 bundled BLLA segmentation weights ([model record](https://zenodo.org/records/22879549), Apache-2.0). Kraken itself is Apache-2.0. Do not replace them with a
-floating model.
+Kraken 7.2 bundled BLLA segmentation weights. Kraken itself is Apache-2.0.
 
 ```sh
 python comparators/kraken_runner.py --model ppocrv6-small --mode line \

@@ -64,9 +64,9 @@ remain in the record.
 | Tesseract fast | ✓ | ✓ | ✓ | ✓ | — | — | Adapter supplied |
 | Rivok Tesseract full and lite | ✓ | ✓ | ✓ | ✓ | — | — | Separate adapters supplied |
 | Rivok Paddle flagship | ✓ | ✓ | ✓ | ✓ | — | — | Adapter supplied; no niqqud |
-| Kraken PP-OCRv6 | — | ✓ | — | ✓ | ✓ | ✓ | Candidate runner supplied; evaluation configuration and rights/exposure review pending |
+| Kraken PP-OCRv6 | — | ✓ | — | ✓ | ✓ | ✓ | Pinned candidate runner supplied. Evaluation configuration and exposure review pending. |
 | cyttic base and large | — | — | — | — | ✓ | — | Blocked: decoder/tokenizer and training lineage review |
-| BiblIA general and script-specific | — | — | — | — | — | ✓ | Candidate runners supplied; matching scripts and share-alike decision pending |
+| BiblIA general and script-specific | — | — | — | — | — | ✓ | All four releases admitted for comparison. Eval records which scripts apply to each set. |
 
 [Kraken's small record](https://zenodo.org/records/21788405) declares Apache-2.0
 and lists `small.safetensors`; its title resolves a prior small/medium naming
