@@ -196,12 +196,15 @@ def sweep(api, ledger: Ledger, *, everything: bool = False, dry_run: bool = Fals
         if everything:
             why = "--all"
         elif r is None:
+            if rid and name.startswith("heocr-hf-"):
+                # An autonomous pod can have been launched from another Mac.
+                continue
             why = "not in this machine's ledger"
         elif "final" in r:
             why = "its run already finished"
         elif deadline and now() > deadline:
             why = "past its deadline"
-        elif res.get("host") == host and not pid_alive(res.get("pid", -1)):
+        elif not res.get("autonomous") and res.get("host") == host and not pid_alive(res.get("pid", -1)):
             why = "its runner is gone"
         else:
             continue
