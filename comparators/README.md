@@ -2,7 +2,7 @@
 
 This directory supplies stock and Rivok Tesseract, plus Rivok's ONNX flagship.
 It is **not a complete or frozen launch roster**. Admission, reference-source
-exclusions, settings and input/output normalization must be fixed by the evaluator
+exclusions, settings and scorer-side normalization must be fixed by the evaluator
 before any held-out run. Never use invented pages to report model performance.
 
 ## Setup
@@ -40,17 +40,9 @@ python comparators/runner.py run --model rivok-full --assets /path/to/assets \
   --mode line --input /path/to/line.png --output /path/to/line.txt
 ```
 
-Use a separate output file for every image, including blank ones. Tesseract uses
-OEM 1 and PSM 3 for pages, PSM 7 for lines. Its UTF-8 output is passed through;
-no reordering or normalization is applied. Rivok Paddle uses its upstream
-word-detector and full-precision CTC/NRTR cascade for both modes, concatenating
-the upstream reading-order lines with newline separators. `line` for this model
-still detects words; it is not a separate line recognizer. The pipeline emits
-logical Unicode order; do not use a visual bidi transform. It cannot emit niqqud,
-so retain this limitation when assessing pointed categories; do not silently strip
-reference marks. PDF page selection, multi-column order, bidi controls, blank
-outputs and final newline conventions require evaluation-owner agreement and
-end-to-end validation against the scorer before a frozen comparison.
+For a frozen comparison, use the [batch scorer transport](CONTRACT.md).
+The single-file examples above remain available for smoke checks.
+Rivok Paddle cannot emit niqqud. Preserve that limitation in pointed runs.
 
 ## Category roster
 
@@ -61,7 +53,7 @@ remain in the record.
 
 | Reader | 1 | 2 | 3 | 4 | 5 | 6 | State |
 |---|---|---|---|---|---|---|---|
-| Tesseract best | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | Adapter supplied; freeze runtime and scorer contract |
+| Tesseract best | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | Raw transport supplied. Freeze runtime and per-set settings. |
 | Tesseract fast | ✓ | ✓ | ✓ | ✓ | — | — | Adapter supplied |
 | Rivok Tesseract full and lite | ✓ | ✓ | ✓ | ✓ | — | — | Separate adapters supplied |
 | Rivok Paddle flagship | ✓ | ✓ | ✓ | ✓ | — | — | Adapter supplied; no niqqud |

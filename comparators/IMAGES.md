@@ -26,6 +26,9 @@ these Linux AMD64 images from commit `86aa84d2b52a77e0077951d89e2f2667f78bf685`.
 | `kraken` | `ghcr.io/heocr/heocr-compute-comparator-kraken@sha256:86eedd8354462eb189b8cea5ec29d52a7957fc4eec18a8a91fba686456c9118c` |
 | `trocr` | `ghcr.io/heocr/heocr-compute-comparator-trocr@sha256:31371c54617df5cff893c1c52ebbd039753acb92abe96dc2965eb0d546519b05` |
 
+The digests above predate the batch transport. For registered runs, select a
+later build with the [batch scorer transport](CONTRACT.md).
+
 The image digest pins the runtime. The [asset manifest](assets.json) and
 [Kraken runner](kraken_runner.py) pin the recognition weights separately.
 Stage assets using the runner's `fetch` action or the exact downloads in
@@ -36,13 +39,14 @@ and runner check.
 For example, after loading authorized assets and inputs locally:
 
 ```sh
-# Set IMAGE to the full reference copied from the publishing job.
+# Set IMAGE to a full reference with batch transport support.
 docker pull --platform linux/amd64 "$IMAGE"
 docker run --rm --platform linux/amd64 --network none \
   --user "$(id -u):$(id -g)" \
   -v "$PWD/assets:/assets:ro" -v "$PWD/input:/input:ro" -v "$PWD/output:/output" \
   "$IMAGE" run --model best --assets /assets --mode page \
-  --input /input/page.png --output /output/page.txt
+  --manifest /input/manifest.json --output-dir /output/ocr-results \
+  --runtime-sha256 "${IMAGE##*@sha256:}" --config-sha256 "$CONFIG_SHA"
 ```
 
 For Kraken, omit the `run` action. For the TrOCR candidate use `--mode line`.

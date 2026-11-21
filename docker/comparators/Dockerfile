@@ -41,7 +41,7 @@ RUN mkdir /tmp/tesseract && tar -xf /tmp/tesseract.tar.gz -C /tmp/tesseract --st
     && cmake --install /tmp/tesseract-build --strip
 
 FROM runtime AS adapter
-COPY comparators/runner.py comparators/assets.json ./
+COPY comparators/runner.py comparators/raw_output.py comparators/assets.json ./
 ENTRYPOINT ["/bin/sh", "/opt/comparators/entrypoint.sh", "/opt/comparators/runner.py"]
 
 FROM adapter AS tesseract
@@ -65,7 +65,7 @@ COPY --from=paddle-build /opt/paddle /opt/paddle
 ENV PATH="/opt/paddle/bin:$PATH"
 
 FROM runtime AS kraken
-COPY comparators/kraken_runner.py comparators/requirements-kraken-linux-amd64.txt ./
+COPY comparators/kraken_runner.py comparators/raw_output.py comparators/requirements-kraken-linux-amd64.txt ./
 RUN python -m pip install --only-binary=:all: --extra-index-url https://download.pytorch.org/whl/cpu \
     -r requirements-kraken-linux-amd64.txt && python -m pip check
 ENTRYPOINT ["/bin/sh", "/opt/comparators/entrypoint.sh", "/opt/comparators/kraken_runner.py"]
