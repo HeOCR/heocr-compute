@@ -80,7 +80,7 @@ Without `--yes`, `run` asks before creating the pod. `--dry-run` does steps 1–
 
 Before reserving a CPU pod, `run`, `render-lines`, and `hf-train` check the 64-vCPU account ceiling. Provisioning CPU pods and unresolved local reservations count toward it. GPU pods contribute zero to this ceiling. The ledger lock coordinates launches that share the same ledger. RunPod still decides whether it can accept the create, including when another machine launches at the same time. Dry runs quote without requiring free vCPUs. If admission reports an unconfirmed reservation, check the existing run and reconcile it before relying on those slots.
 
-Use `--wait-for-capacity` to keep a CPU launch pending while the account is full. The launcher logs each capacity wait and rechecks about every five minutes. Set `--max-wait HOURS` to override the default six hours. The ledger lock is free between checks. The launcher checks live budget and capacity before reserving, and the pod wall limit starts at launch. Account verification and budget errors stop the launch immediately.
+CPU launches wait in the local queue by default while the account is full. The launcher records the wait in the ledger, logs each shortage, and rechecks about every five minutes. `heocr-remote spend` shows current waiters. Use `--max-wait HOURS` to override the default six hours or `--no-wait-for-capacity` for an immediate refusal. Keep the launcher running while queued. The ledger lock is free between checks. The launcher checks live budget and capacity before reserving, and the pod wall limit starts at launch. Account verification and budget errors stop the launch immediately.
 
 ## CPU line rendering
 
@@ -115,6 +115,8 @@ Only open training inputs go to a pod: synthetic lists, htext and public-domain 
 ## The ledger
 
 `~/.config/heocr/remote/spend.jsonl` (or `$HEOCR_REMOTE_STATE/spend.jsonl`), outside any repository. JSON lines, one per event:
+- `queue`: a waiting run's ID, vCPU request, launcher identity and wait limit;
+- `queue_end`: why a wait ended before reservation;
 - `reserve`: the worst case, before a pod exists;
 - `pod`: the pod's id and billed hourly price;
 - `final`: `date`, `pod_type`, `hours`, `usd`, `status`.

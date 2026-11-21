@@ -13,7 +13,7 @@ from pathlib import Path
 from . import budget, manifest, profiles, render_job
 from .api import load_hf_token
 from .policy import Policy
-from .runner import RunFailed, Runner, Spec
+from .runner import DEFAULT_CAPACITY_WAIT_HOURS, RunFailed, Runner, Spec
 
 HF = "https://huggingface.co"
 DATASET = "HeOCR/htext-pby"
@@ -194,7 +194,8 @@ def launch(a, connect) -> dict:
         manifest.dump(manifest.build(root, policy), listing)
         spec = Spec(profile, listing, root, COMMAND, a.hours, run_cap=a.run_cap,
                     month_cap=a.month_cap, results=result_base, dry_run=a.dry_run, yes=a.yes,
-                    policy=policy, render_bundle=True, capacity_wait_hours=getattr(a, "capacity_wait_hours", None))
+                    policy=policy, render_bundle=True,
+                    capacity_wait_hours=getattr(a, "capacity_wait_hours", DEFAULT_CAPACITY_WAIT_HOURS))
         result = Runner(*connect()).run(spec)
     if result["status"] == "ok":
         dest = result_base / result["run_id"]

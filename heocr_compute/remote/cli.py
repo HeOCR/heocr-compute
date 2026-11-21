@@ -84,7 +84,8 @@ def _spec(a, p: profiles.Profile, manifest_path, root, cmd, run_cap) -> Spec:
                 pull_intermediate=getattr(a, "pull_intermediate", False),
                 results=Path(a.results).expanduser() if getattr(a, "results", None) else None,
                 max_pull_gb=getattr(a, "max_pull_gb", 2.0), max_upload_gb=getattr(a, "max_upload_gb", 20.0),
-                dry_run=a.dry_run, yes=a.yes, capacity_wait_hours=getattr(a, "capacity_wait_hours", None))
+                dry_run=a.dry_run, yes=a.yes,
+                capacity_wait_hours=getattr(a, "capacity_wait_hours", DEFAULT_CAPACITY_WAIT_HOURS))
 
 
 def _report(res) -> int:
@@ -169,6 +170,8 @@ def cmd_spend(a):
         print(f"  {e['date']}  {e['pod_type']:40} open, up to ${e['usd_est']:.2f}")
     if m["others"]:
         print(f"not counted: {len(m['others'])} runs ({usd(m['other_spent'])}) on other or untagged accounts")
+    for entry in led.waiting():
+        print(f"  {entry['date']}  {entry['run_id']} queued for {entry['vcpus']} vCPUs (PID {entry['pid']})")
     print(f"ledger: {led.path}")
 
 
@@ -189,7 +192,8 @@ def main(argv=None) -> int:
                        help="monthly cap in $ (default and maximum 150)")
 
     def capacity_wait(p):
-        p.add_argument("--wait-for-capacity", action="store_true", help="wait for CPU account vCPUs to become free")
+        p.add_argument("--wait-for-capacity", action=argparse.BooleanOptionalAction, default=True,
+                       help="wait for CPU account vCPUs to become free (enabled by default)")
         p.add_argument("--max-wait", type=float, metavar="HOURS",
                        help=f"capacity wait limit in hours (default {DEFAULT_CAPACITY_WAIT_HOURS:g})")
 
@@ -293,12 +297,15 @@ def main(argv=None) -> int:
     sw.set_defaults(fn=cmd_sweep)
 
     a = ap.parse_args(argv)
-    if getattr(a, "wait_for_capacity", False):
-        a.capacity_wait_hours = DEFAULT_CAPACITY_WAIT_HOURS if a.max_wait is None else a.max_wait
-        if not math.isfinite(a.capacity_wait_hours * 3600) or a.capacity_wait_hours <= 0:
-            ap.error("--max-wait must be a finite, positive number of hours")
-    elif getattr(a, "max_wait", None) is not None:
-        ap.error("--max-wait requires --wait-for-capacity")
+    if hasattr(a, "wait_for_capacity"):
+        if a.wait_for_capacity:
+            a.capacity_wait_hours = DEFAULT_CAPACITY_WAIT_HOURS if a.max_wait is None else a.max_wait
+            if not math.isfinite(a.capacity_wait_hours * 3600) or a.capacity_wait_hours <= 0:
+                ap.error("--max-wait must be a finite, positive number of hours")
+        else:
+            if a.max_wait is not None:
+                ap.error("--max-wait cannot be combined with --no-wait-for-capacity")
+            a.capacity_wait_hours = None
     try:
         return a.fn(a) or 0
     except (budget.BudgetRefused, Refused, manifest.ManifestError, RunFailed, RunPodError, ValueError) as e:

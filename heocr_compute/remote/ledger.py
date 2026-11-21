@@ -3,6 +3,8 @@
 Location: ``$HEOCR_REMOTE_STATE/spend.jsonl``, by default ``~/.config/heocr/remote/spend.jsonl``.
 
 Events of a run, all with ``run_id``:
+- ``queue``: the local launcher is waiting for CPU capacity;
+- ``queue_end``: the wait ended before a reservation was made;
 - ``reserve``: written before a pod is created, with the run's worst-case cost (``usd_est``);
 - ``pod``: the pod's id and its actual hourly price, once created;
 - ``final``: date, pod type, hours and dollars actually spent, and how the run ended.
@@ -24,6 +26,7 @@ import datetime as dt
 import fcntl
 import json
 import os
+import socket
 from pathlib import Path
 
 STATE_ENV = "HEOCR_REMOTE_STATE"
@@ -42,6 +45,16 @@ def utcnow() -> dt.datetime:
 
 def month_of(ts: str) -> str:
     return ts[:7]
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 class Ledger:
@@ -80,7 +93,7 @@ class Ledger:
         return event
 
     def runs(self) -> dict[str, dict]:
-        """Per run: its reservation, pod and final events merged."""
+        """Group the latest event of each type by run."""
         runs: dict[str, dict] = {}
         for e in self.events():
             r = runs.setdefault(e["run_id"], {"run_id": e["run_id"]})
@@ -115,6 +128,30 @@ class Ledger:
         return {"month": month, "account": self.account, "spent": round(spent, 4),
                 "open_estimate": round(open_est, 4), "total": round(spent + open_est, 4),
                 "finals": finals, "open": open_runs, "other_spent": round(other, 4), "others": others}
+
+    def waiting(self) -> list[dict]:
+        """Current capacity waiters for this account, independent of the spend month."""
+        now, host = self.now().timestamp(), socket.gethostname()
+        queued = []
+        for r in self.runs().values():
+            event = r.get("queue")
+            if not event or any(k in r for k in ("queue_end", "reserve", "final")):
+                continue
+            if self.account is not None and event.get("account") != self.account:
+                continue
+            if now >= dt.datetime.fromisoformat(event["date"]).timestamp() + event["wait_seconds"]:
+                continue
+            if event["host"] == host and not pid_alive(event["pid"]):
+                continue
+            queued.append(event)
+        return queued
+
+    def queue(self, run_id: str, *, vcpus: int, wait_seconds: float) -> dict:
+        return self.append({"event": "queue", "run_id": run_id, "pid": os.getpid(),
+                            "host": socket.gethostname(), "vcpus": vcpus, "wait_seconds": wait_seconds})
+
+    def end_queue(self, run_id: str, *, status: str) -> dict:
+        return self.append({"event": "queue_end", "run_id": run_id, "status": status})
 
     def reserve(self, run_id: str, **fields) -> dict:
         return self.append({"event": "reserve", "run_id": run_id, "pid": os.getpid(), **fields})

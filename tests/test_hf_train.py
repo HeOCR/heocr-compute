@@ -237,9 +237,14 @@ class HfTrainTest(unittest.TestCase):
         self.api.list_pods.return_value = [
             {"id": "example-busy", "name": "other-workload", "status": "STARTING", "cpu": {"vcpuCount": 64}},
         ]
-        with patch.object(Policy, "load", return_value=Policy()), contextlib.redirect_stdout(io.StringIO()), \
-                self.assertRaisesRegex(Refused, "requested 2 vCPUs, 0 of 64 available"):
-            hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger)
+        with patch.object(cli, "_connect", return_value=(self.api, self.ledger)), \
+                patch.object(Policy, "load", return_value=Policy()), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            rc = cli.main(["hf-train", "--profile", "smoke", "--job", str(self.jobfile), "--yes",
+                           "--approved-sha256", self.args.approved_sha256, "--hf-secret", self.args.hf_secret,
+                           "--hours", "1", "--run-cap", "1", "--no-wait-for-capacity"])
+        self.assertEqual(rc, 2)
+        self.assertIn("requested 2 vCPUs, 0 of 64 available", stderr.getvalue())
         self.api.create_pod.assert_not_called()
         self.api.terminate.assert_not_called()
         self.assertEqual(self.ledger.events(), [])
@@ -261,7 +266,9 @@ class HfTrainTest(unittest.TestCase):
         def sleep(seconds):
             nonlocal elapsed
             self.assertEqual(seconds, 300)
-            self.assertEqual(self.ledger.events(), [])
+            event, = self.ledger.waiting()
+            self.assertEqual((event["vcpus"], event["wait_seconds"]), (2, 21_600))
+            self.assertEqual(self.ledger.month_to_date()["total"], 0)
             self.api.create_pod.assert_not_called()
             elapsed += seconds
 
@@ -271,11 +278,13 @@ class HfTrainTest(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             rc = cli.main(["hf-train", "--profile", "smoke", "--job", str(self.jobfile), "--yes",
                            "--approved-sha256", self.args.approved_sha256, "--hf-secret", self.args.hf_secret,
-                           "--hours", "1", "--run-cap", "1", "--wait-for-capacity", "--max-wait", "1"])
+                           "--hours", "1", "--run-cap", "1"])
         self.assertEqual(rc, 0)
         runner.sleep.assert_called_once_with(300)
         self.api.create_pod.assert_called_once()
-        reserve = self.ledger.events()[0]
+        self.assertEqual(self.ledger.waiting(), [])
+        queued, reserve, _, _ = self.ledger.events()
+        self.assertEqual((queued["event"], reserve["event"]), ("queue", "reserve"))
         self.assertEqual(reserve["startup_deadline_utc"], (after + dt.timedelta(minutes=15)).isoformat())
         self.assertEqual(reserve["deadman_utc"], (after + dt.timedelta(hours=1)).isoformat())
 

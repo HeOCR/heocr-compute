@@ -13,8 +13,8 @@ from types import SimpleNamespace
 from . import budget, hf_job
 from .api import RunPodError, load_hf_token
 from .policy import Policy, Refused
-from .runner import (HF_PROFILE_MARKER, Runner, new_run_id, observe_startup, pod_name, reconcile_startup_cost,
-                     record_startup, terminate_confirmed)
+from .runner import (DEFAULT_CAPACITY_WAIT_HOURS, HF_PROFILE_MARKER, Runner, new_run_id, observe_startup, pod_name,
+                     reconcile_startup_cost, record_startup, terminate_confirmed)
 
 KRAKEN_TRAIN_IMAGE = "ghcr.io/heocr/heocr-compute-kraken-train@"
 STARTUP_POLL_SECONDS = 10
@@ -92,9 +92,10 @@ def launch(a, profile, api, ledger):
     run_id = new_run_id(runner.now())
     name = pod_name(HF_PROFILE_MARKER, run_id)
     spec = SimpleNamespace(profile=profile, hours=a.hours, run_cap=a.run_cap, month_cap=a.month_cap,
-                           dry_run=a.dry_run, yes=a.yes, capacity_wait_hours=getattr(a, "capacity_wait_hours", None))
+                           dry_run=a.dry_run, yes=a.yes,
+                           capacity_wait_hours=getattr(a, "capacity_wait_hours", DEFAULT_CAPACITY_WAIT_HOURS))
     print(f"Hub inputs: {len(job['inputs'])} files, {total:,} bytes. Job spec: {len(raw):,} bytes.")
-    with runner.launch_slot(spec) as (quote, waited):
+    with runner.launch_slot(spec, run_id) as (quote, waited):
         if quote is None:
             return 0
         if a.dry_run:
