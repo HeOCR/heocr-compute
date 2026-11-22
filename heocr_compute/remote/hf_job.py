@@ -10,6 +10,8 @@ from . import manifest
 
 SCHEMA = "heocr_hf_training.v1"
 RECEIPT = "heocr_hf_training_receipt.v1"
+TELEMETRY_SCHEMA = "heocr_hf_training.v2"
+TELEMETRY_RECEIPT = "heocr_hf_training_receipt.v2"
 MAX_SPEC = 24 * 1024
 HUB = "https://huggingface.co"
 SHA = re.compile(r"[0-9a-f]{64}")
@@ -60,14 +62,49 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def checkpoint_groups(job):
+    """Map each checkpoint to the files committed with it."""
+    telemetry = job.get("telemetry")
+    for spec in job["snapshots"]:
+        files = {spec["name"]: spec["max_bytes"]}
+        if telemetry is not None:
+            stem = Path(spec["name"]).stem
+            files[f"{stem}.training-metrics.json"] = telemetry["metrics_max_bytes"]
+            files[f"{stem}.trainer.log"] = telemetry["trainer_log_max_bytes"]
+        yield files
+
+
+def final_logs(job):
+    telemetry = job.get("telemetry")
+    if telemetry is None:
+        return {}
+    return {"training.log": telemetry["run_log_max_bytes"],
+            "setup.log": telemetry["setup_log_max_bytes"],
+            "partial.trainer.log": telemetry["trainer_log_max_bytes"]}
+
+
+def output_limits(job):
+    outputs = final_logs(job)
+    for group in checkpoint_groups(job):
+        outputs.update(group)
+    return outputs
+
+
 def parse(raw, approved):
     require(len(raw) <= MAX_SPEC and matches(SHA, approved) and digest(raw) == approved,
             "job exceeds size limit or differs from the approved SHA-256")
     require(not re.search(rb"\bhf_[a-zA-Z0-9]{20,}\b", raw), "job must not contain a Hub token")
     job = json.loads(raw.decode("utf-8"))
-    fields(job, "schema clean_sha256 image inputs entrypoint args snapshots output")
-    require(job["schema"] == SCHEMA and matches(SHA, job["clean_sha256"]),
+    require(isinstance(job, dict) and job.get("schema") in (SCHEMA, TELEMETRY_SCHEMA),
+            "expected an autonomous training job schema")
+    telemetry_enabled = job["schema"] == TELEMETRY_SCHEMA
+    fields(job, "schema clean_sha256 image inputs entrypoint args snapshots output"
+           + (" telemetry" if telemetry_enabled else ""))
+    require(matches(SHA, job["clean_sha256"]),
             "expected the training schema and exact CLEAN receipt SHA-256")
+    if telemetry_enabled:
+        fields(job["telemetry"], "metrics_max_bytes trainer_log_max_bytes run_log_max_bytes setup_log_max_bytes")
+        require(all(size_ok(limit) for limit in job["telemetry"].values()), "invalid telemetry size limit")
     require(matches(IMAGE, job["image"]), "expected a digest-pinned worker image")
     fields(job["output"], "repo type")
     location(job["output"])
@@ -95,6 +132,12 @@ def parse(raw, approved):
         require("/" not in name and name not in seen and name.endswith(ARTIFACT_SUFFIXES)
                 and size_ok(spec["max_bytes"]), "invalid or duplicate snapshot")
         seen.add(name)
+    if telemetry_enabled:
+        names = [*final_logs(job), *(name for group in checkpoint_groups(job) for name in group)]
+        require(len(names) == len(set(names)), "telemetry output names collide")
+        require(len(names) <= 128, "too many files for a bounded run receipt")
+        for name in names:
+            safe_path(name)
     return job
 
 
@@ -140,7 +183,7 @@ class Hub:
         except Exception:
             raise ValueError("could not download a bounded file from the pinned Hub revision") from None
 
-    def commit(self, output, prefix, receipt, artifact=None):
+    def commit(self, output, prefix, receipt, artifacts=()):
         # Optimistic parent pins protect concurrent runs writing to the same private repository.
         for _ in range(3):
             try:
@@ -149,14 +192,15 @@ class Hub:
                 break
             ops = [self.add(path_in_repo=f"{prefix}/receipt.json",
                             path_or_fileobj=json.dumps(receipt, sort_keys=True).encode("utf-8"))]
-            if artifact is not None:
-                ops.append(self.add(path_in_repo=f"{prefix}/{artifact.name}", path_or_fileobj=artifact))
+            ops.extend(self.add(path_in_repo=f"{prefix}/{path.name}", path_or_fileobj=path) for path in artifacts)
             try:
                 result = self.api.create_commit(output["repo"], repo_type=output["type"], parent_commit=parent,
                                                 commit_message=f"Training snapshots for {receipt['run_id']}",
                                                 operations=ops)
                 require(matches(REVISION, result.oid), "Hub did not confirm an immutable snapshot revision")
                 return
+            except KeyboardInterrupt:
+                raise PublishError("private Hub commit was interrupted during publication") from None
             except Exception as exc:
                 if getattr(getattr(exc, "response", None), "status_code", None) not in (409, 412):
                     break

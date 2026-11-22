@@ -82,10 +82,12 @@ def launch(a, profile, api, ledger):
     hf_job.require(math.isfinite(startup_minutes) and 0 < startup_minutes <= startup_limit,
                    "startup minutes must be positive and within the quoted startup allowance")
     total = sum(item["size"] for item in job["inputs"])
-    largest_snapshot = max(item["max_bytes"] for item in job["snapshots"])
-    # Inputs are cached and copied. Keep space for the staging copy of one snapshot.
-    hf_job.require(2 * total + sum(s["max_bytes"] for s in job["snapshots"]) + largest_snapshot
-                   < profile.disk_gb * 10**9, "declared input and snapshot bytes exceed the pod disk")
+    outputs = sum(hf_job.output_limits(job).values())
+    largest_group = max(sum(group.values()) for group in hf_job.checkpoint_groups(job))
+    staging = max(largest_group, sum(hf_job.final_logs(job).values()))
+    # Inputs are cached and copied. Keep space for one atomic output commit.
+    hf_job.require(2 * total + outputs + staging < profile.disk_gb * 10**9,
+                   "declared input and output bytes exceed the pod disk")
     check_hub_inputs(job)
 
     runner = Runner(api, ledger)
@@ -106,11 +108,12 @@ def launch(a, profile, api, ledger):
         reserved = runner.now()
         deadline = reserved + dt.timedelta(hours=a.hours)
         startup_deadline = min(deadline, reserved + dt.timedelta(minutes=startup_minutes))
+        telemetry = {"telemetry": job["telemetry"]} if "telemetry" in job else {}
         ledger.reserve(run_id, profile=profile.name, pod_type=profile.pod_type, vcpus=profile.vcpus,
                        usd_est=quote.usd_est, hours_max=quote.hours, deadman_utc=deadline.isoformat(),
                        startup_deadline_utc=startup_deadline.isoformat(), autonomous=True,
                        output=job["output"], job_sha256=a.approved_sha256, clean_sha256=job["clean_sha256"],
-                       snapshots=job["snapshots"])
+                       snapshots=job["snapshots"], **telemetry)
     env = {
         "HEOCR_HF_JOB": raw.decode("utf-8"),
         "HEOCR_HF_JOB_SHA256": a.approved_sha256,
@@ -120,6 +123,8 @@ def launch(a, profile, api, ledger):
     }
     if repo_scope is not None:
         env["HEOCR_HF_REPO_SCOPE"] = repo_scope
+    if "telemetry" in job:
+        env["HEOCR_HF_FINALIZE_LOGS"] = "1"
     body = profile.body(name, env)
     body.update(image=job["image"], ports=[], startSsh=False)
     if registry is not None:
@@ -146,23 +151,34 @@ def launch(a, profile, api, ledger):
 
 def validate_receipt(receipt, run_id, pod_id, reserve):
     hf_job.fields(receipt, "schema run_id pod_id job_sha256 clean_sha256 started_utc finished_utc status snapshots")
-    hf_job.require(receipt["schema"] == hf_job.RECEIPT and receipt["run_id"] == run_id
+    telemetry = "telemetry" in reserve
+    schema = hf_job.TELEMETRY_RECEIPT if telemetry else hf_job.RECEIPT
+    hf_job.require(receipt["schema"] == schema and receipt["run_id"] == run_id
                    and receipt["pod_id"] == pod_id
                    and receipt["job_sha256"] == reserve["job_sha256"]
                    and receipt["clean_sha256"] == reserve["clean_sha256"]
                    and receipt["status"] in ("running", "ok", "failed")
                    and isinstance(receipt["snapshots"], list), "run receipt does not match the reservation")
-    limits = {s["name"]: s["max_bytes"] for s in reserve["snapshots"]}
+    limits = hf_job.output_limits(reserve)
     names = set()
     for entry in receipt["snapshots"]:
         hf_job.fields(entry, "name size sha256")
         name = hf_job.safe_path(entry["name"])
         hf_job.require(name in limits and name not in names and hf_job.size_ok(entry["size"])
                        and entry["size"] <= limits[name] and hf_job.matches(hf_job.SHA, entry["sha256"]),
-                       "unlisted or oversized snapshot in receipt")
+                       "unlisted or oversized output in receipt")
         names.add(name)
+    required = {name for group in hf_job.checkpoint_groups(reserve) for name in group}
+    if telemetry:
+        for group in hf_job.checkpoint_groups(reserve):
+            hf_job.require(not names.intersection(group) or group.keys() <= names,
+                           "receipt contains an incomplete checkpoint group")
+        hf_job.require(receipt["status"] != "running" or not names.intersection(hf_job.final_logs(reserve)),
+                       "running receipt contains final logs")
+        required.add("training.log")
     if receipt["status"] == "ok":
-        hf_job.require(names == limits.keys(), "successful receipt is missing snapshots")
+        hf_job.require(required <= names and "partial.trainer.log" not in names,
+                       "successful receipt is missing committed outputs or contains a partial log")
 
 
 def materialize(hub, output, prefix, revision, receipt, destination, cache):
@@ -241,5 +257,5 @@ def collect(a, api, ledger):
                                  pod_id=pod_id, hub_revision=revision)
         else:
             print("Provider billing is pending. The estimate remains reserved.")
-    print(f"Collected {len(receipt['snapshots'])} verified snapshots from {revision} into {dest}.")
+    print(f"Collected {len(receipt['snapshots'])} verified outputs from {revision} into {dest}.")
     return 0 if receipt["status"] == "ok" else 1
