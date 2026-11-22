@@ -70,6 +70,47 @@ heocr-remote collect-hf "$RUN_ID" --results "$PRIVATE_RESULTS"
 
 Collection pins the current private output revision once, checks the run and job IDs against the ledger, and verifies every returned snapshot's size and SHA-256 before exposing the result directory. Earlier committed snapshots can be collected after an incomplete run. If billing is delayed, collect again to reconcile it. The original estimate remains reserved until provider billing is available. The regular sweeper preserves autonomous pods before their recorded deadline even if the launcher is gone. It also preserves autonomous pods belonging to another launcher's ledger, unless explicitly invoked with `--all`.
 
+## Deadline incident follow-up
+
+A long training run reached its recorded deadline without a verified
+teardown or Hub receipt at the alarm. The subsequent account check found the
+pod gone, and the pinned private output still had no checkpoint or receipt.
+The deletion timestamp, actor and provider reason were unavailable. Those
+observations leave the exact failure stage open.
+
+The current worker runs its deadline guard inside the same container as the
+supervisor. It can act only after the entrypoint starts and while that
+container can call the provider. Deletion starts at the cutoff and may take
+several bounded attempts. The guard routes its output to `/dev/null` and
+checks the CLI exit code, so there is no retained per-attempt result or
+account-side confirmation. A successful short smoke covers the immediate
+exit path. Exercise the absolute-deadline path separately.
+
+The trainer can declare just a final snapshot. The supervisor publishes a
+receipt with a snapshot or after the trainer exits. An absent receipt
+therefore leaves download, training and publication failures
+indistinguishable. A missing or invalid receipt also prevents the standard
+collector from reaching billing reconciliation.
+
+### Follow-up requirements
+
+1. Retain an account-side deadline check independent of the launcher and
+   training container. Bind it to the exact approved pod ID and deadline.
+   Confirm deletion through the provider, retry idempotently within a bounded
+   window, and alert with the last known state if confirmation fails.
+2. Publish a minimal running receipt before pulling inputs, followed by
+   sanitized stage transitions and explicit checkpoint commits. For long
+   jobs, declare intermediate snapshots that downstream consumers can
+   recover and verify. Allow bounded worker and publication time before the
+   independently enforced cutoff.
+3. Persist sanitized teardown attempt outcomes and reconcile provider
+   billing for vanished pods even when the training receipt is absent.
+4. Add offline failure-injection coverage for a failed or hung input pull,
+   a trainer that never exits, a timed-out Hub commit, a transient deletion
+   error, and a missing receipt with a provider bill. Include an authorized
+   invented-input smoke that reaches its deadline and confirms provider
+   disappearance without relying on early successful training.
+
 ## Published worker
 
 The [Publish training worker workflow](../.github/workflows/publish-training-image.yml) builds the Linux AMD64 worker from main and publishes it as `ghcr.io/heocr/heocr-compute-train:sha-<commit>`. Its job output and summary give the image reference by digest for the job spec. The build context contains only the committed launcher code, package metadata and worker build files.
