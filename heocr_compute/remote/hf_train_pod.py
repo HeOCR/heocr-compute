@@ -31,26 +31,51 @@ def fetch_inputs(job, root, hub):
         shutil.copyfile(source, path)
 
 
+def freeze_output(path, staging, limit):
+    hf_job.require(not path.is_symlink() and path.is_file(), "output must be a regular file")
+    size = path.stat().st_size
+    hf_job.require(0 < size <= limit, "output exceeds its declared limit or is empty")
+    frozen = staging / path.name
+    shutil.copyfile(path, frozen)
+    sha = sha256_file(frozen)
+    hf_job.require(frozen.stat().st_size == size and sha256_file(path) == sha,
+                   "output changed while being staged for publication")
+    return frozen, {"name": path.name, "size": size, "sha256": sha}
+
+
+def present(path):
+    return path.exists() or path.is_symlink()
+
+
 def publish_ready(job, out, staging, hub, prefix, receipt):
     uploaded = {record["name"] for record in receipt["snapshots"]}
-    for spec in job["snapshots"]:
-        name = spec["name"]
-        path = out / name
-        if name in uploaded or not (path.exists() or path.is_symlink()):
+    for group in hf_job.checkpoint_groups(job):
+        if uploaded.intersection(group) or not all(present(out / name) for name in group):
             continue
-        hf_job.require(not path.is_symlink() and path.is_file(), "snapshot must be a regular file")
-        size = path.stat().st_size
-        hf_job.require(0 < size <= spec["max_bytes"], "snapshot exceeds its declared limit")
-        frozen = staging / name
-        shutil.copyfile(path, frozen)
-        sha = sha256_file(frozen)
-        hf_job.require(frozen.stat().st_size == size and sha256_file(path) == sha,
-                       "snapshot was modified instead of atomically published by the trainer")
-        entry = {"name": name, "size": size, "sha256": sha}
-        updated = {**receipt, "snapshots": [*receipt["snapshots"], entry]}
-        hub.commit(job["output"], prefix, updated, frozen)
-        receipt["snapshots"].append(entry)
-        frozen.unlink()
+        files, entries = zip(*(freeze_output(out / name, staging, limit) for name, limit in group.items()))
+        updated = {**receipt, "snapshots": [*receipt["snapshots"], *entries]}
+        hub.commit(job["output"], prefix, updated, files)
+        receipt["snapshots"].extend(entries)
+        for frozen in files:
+            frozen.unlink()
+
+
+def stop_child(child):
+    if child is None or child.poll() is not None:
+        return
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+        child.wait(timeout=5)
+    except ProcessLookupError:
+        pass
+    except subprocess.TimeoutExpired:
+        pass
+    finally:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait()
 
 
 def train(job, root, hub, receipt):
@@ -65,16 +90,21 @@ def train(job, root, hub, receipt):
         # An approved entrypoint is trusted code. Keep provider and Hub credentials out of its env.
         names = ("PATH", "HOME", "LANG", "LC_ALL", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES")
         env = {key: os.environ[key] for key in names if key in os.environ}
+        env["HEOCR_HF_RUN_ID"] = receipt["run_id"]
         with (root / "training.log").open("wb") as log:
+            if "telemetry" in job:
+                log.write(b"Starting training entrypoint.\n")
+                log.flush()
             child = subprocess.Popen(["/bin/bash", str(inp / job["entrypoint"]), *job["args"]],
                                      cwd=root, env=env, stdin=subprocess.DEVNULL,
-                                     stdout=log, stderr=subprocess.STDOUT)
+                                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             while child.poll() is None:
                 publish_ready(job, out, staging, hub, prefix, receipt)
                 time.sleep(1)
             publish_ready(job, out, staging, hub, prefix, receipt)
-            hf_job.require(child.returncode == 0 and len(receipt["snapshots"]) == len(job["snapshots"]),
-                           "trainer failed or omitted a snapshot")
+            expected = sum(len(group) for group in hf_job.checkpoint_groups(job))
+            hf_job.require(child.returncode == 0 and len(receipt["snapshots"]) == expected,
+                           "trainer failed or omitted a checkpoint file")
         receipt["status"] = "ok"
     except hf_job.PublishError:
         # A commit may have landed after its response was lost. Preserve that receipt.
@@ -82,11 +112,25 @@ def train(job, root, hub, receipt):
     except (Exception, KeyboardInterrupt):
         receipt["status"] = "failed"
     finally:
-        if child is not None and child.poll() is None:
-            child.kill()
-            child.wait()
+        stop_child(child)
     receipt["finished_utc"] = dt.datetime.now(dt.timezone.utc).isoformat()
-    hub.commit(job["output"], prefix, receipt)
+    logs = []
+    for name, limit in hf_job.final_logs(job).items():
+        path = (root if name == "training.log" else out) / name
+        if not present(path):
+            if name == "training.log":
+                receipt["status"] = "failed"
+            continue
+        if name == "partial.trainer.log":
+            receipt["status"] = "failed"
+        try:
+            frozen, record = freeze_output(path, staging, limit)
+        except ValueError:
+            receipt["status"] = "failed"
+            continue
+        logs.append(frozen)
+        receipt["snapshots"].append(record)
+    hub.commit(job["output"], prefix, receipt, logs)
     return receipt["status"]
 
 
@@ -110,7 +154,8 @@ def main():
         hf_job.require(hf_job.matches(hf_job.RUN_ID, run_id), "invalid run ID")
         started = dt.datetime.now(dt.timezone.utc).isoformat()
         receipt = {
-            "schema": hf_job.RECEIPT, "run_id": run_id, "pod_id": os.environ["RUNPOD_POD_ID"],
+            "schema": hf_job.TELEMETRY_RECEIPT if "telemetry" in job else hf_job.RECEIPT,
+            "run_id": run_id, "pod_id": os.environ["RUNPOD_POD_ID"],
             "job_sha256": spec_sha, "clean_sha256": job["clean_sha256"],
             "started_utc": started, "finished_utc": None, "status": "running", "snapshots": [],
         }

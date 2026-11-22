@@ -56,9 +56,28 @@ The reservation also stores the startup deadline. If the launcher is interrupted
 
 A training incident had a provider reservation and null runtime through the wall deadline. An operator terminated the pod, and the private output contained no artifacts. The in-container guard could arm only after the entrypoint began. The input fetch runs after that setup. The remaining provider evidence does not distinguish host provisioning, image pull, or a container that exited before startup could be observed.
 
-The pod arms its deadline guard before making Hub requests. It checks that the pinned source repositories are private, downloads only declared files, verifies byte sizes and SHA-256, and starts the pinned job under `/heocr` with inputs in `in/`. Write each expected snapshot to a temporary name and atomically rename it to the declared filename in `out/` once complete. Each declared snapshot is immutable after rename and has its own size limit. The supervisor commits snapshots as they become available, each alongside a checksum receipt under `runs/<run-id>/`. The final receipt records success only when the trainer exits cleanly and all snapshots are committed. Trainer logs and training data stay off the output repository.
+The pod arms its deadline guard before making Hub requests. It checks that the pinned source repositories are private, downloads only declared files, verifies byte sizes and SHA-256, and starts the pinned job under `/heocr` with inputs in `in/`. Write each expected snapshot to a temporary name and atomically rename it to the declared filename in `out/` once complete. Each declared snapshot is immutable after rename and has its own size limit. The supervisor commits snapshots as they become available, each alongside a checksum receipt under `runs/<run-id>/`. A v1 receipt records success after the trainer exits cleanly and every snapshot is committed. Trainer logs remain pod-local for v1 jobs.
 
 The deadline uses the absolute launch cutoff. The container timeout stops the worker shortly before cutoff, leaving time for shutdown, and the guard independently attempts pod deletion at cutoff. The pod also attempts deletion after success or failure. A provisioning failure before the entrypoint starts or a Runpod deletion outage can require the account sweeper or console. Before approving a real-data launch, use a separately approved invented-input smoke run to verify managed-secret injection, snapshot publication and self-termination on the actual image and account.
+
+### Checkpoint telemetry and private training logs
+
+Set `schema` to `heocr_hf_training.v2` and include `telemetry` in the exact job spec to enable checkpoint metrics and log publication. Explicit byte limits apply to each artifact, including the runner's full log. Use a private output repository approved to retain trainer logs.
+
+```json
+"telemetry": {
+  "metrics_max_bytes": 64000,
+  "trainer_log_max_bytes": 8000000,
+  "run_log_max_bytes": 8000000,
+  "setup_log_max_bytes": 8000000
+}
+```
+
+For each declared snapshot, atomically rename both `<stem>.training-metrics.json` and `<stem>.trainer.log` into `out/` after closing them. `<stem>` is the snapshot filename with its final extension removed. Close and publish the snapshot the same way. The supervisor waits for all three files and commits them atomically with the running receipt. The trainer can also close and write `out/setup.log` and, on failure, `out/partial.trainer.log`. The supervisor adds those logs when present and publishes its own closed `training.log` with the final receipt. All published artifacts must be nonempty. Avoid logging prompt or environment data that is outside the approved run scope. The supervisor gives v2 runs an earlier shutdown signal to leave room for bounded log publication before the absolute deadline.
+
+The v2 receipt lists the checksum and size of every committed file. A successful receipt requires all checkpoint groups and the full `training.log`. A failed receipt may contain completed groups and partial failure logs. If a Hub commit cannot be confirmed, the supervisor preserves the latest visible receipt. The collector checks group completeness, filenames, sizes and digests against the reservation.
+
+Tesseract trainers can apply `heocr_compute.remote.tesseract_telemetry.instrument` to `src/training/lstmtraining.cpp` at the pinned `SOURCE_REVISION`. This changes the CLI stopping counter to sample attempts and emits one `HEOCR_VISIT` record per main-loop attempt. `summarize` joins the exact attempt window to the ordered lane ledger. The training loss is native activation RMS, and BCER is native bag-of-characters error over recoder outputs. Both are fractions from the same training forward pass. Skipped attempts get no loss or BCER denominator. A missing or noncontiguous trace fails the window.
 
 ## Collect and reconcile
 

@@ -314,16 +314,89 @@ class HfTrainTest(unittest.TestCase):
         work = self.root / "pod"
         work.mkdir()
         commits = []
-        def commit(output, prefix, receipt, snapshot=None):
-            commits.append((prefix, json.loads(json.dumps(receipt)), snapshot.read_bytes() if snapshot else None))
+        def commit(output, prefix, receipt, files=()):
+            commits.append((prefix, json.loads(json.dumps(receipt)), [file.read_bytes() for file in files]))
         hub.commit.side_effect = commit
         receipt = {"run_id": "20990101-000000-abcd", "status": "running", "snapshots": []}
         self.assertEqual(hf_train_pod.train(self.job, work, hub, receipt), "ok")
         self.assertEqual([c[1]["status"] for c in commits], ["running", "ok"])
-        self.assertEqual(commits[0][2], b"invented")
+        self.assertEqual(commits[0][2], [b"invented"])
         self.assertEqual(commits[0][1]["snapshots"][0]["sha256"], hf_job.digest(b"invented"))
         hub.private_revision.assert_any_call({"repo": "HeOCR/example-input", "type": "dataset"}, "1" * 40)
         hub.download.assert_called_once_with(self.job["inputs"][0], "trainer.sh", "1" * 40, self.source.stat().st_size)
+
+    def run_telemetry_job(self, script):
+        self.job["schema"] = hf_job.TELEMETRY_SCHEMA
+        self.job["telemetry"] = {key: 500 for key in ("metrics_max_bytes", "trainer_log_max_bytes",
+                                                    "run_log_max_bytes", "setup_log_max_bytes")}
+        self.source.write_text(script)
+        self.job["inputs"][0].update(size=self.source.stat().st_size,
+                                     sha256=hf_job.digest(self.source.read_bytes()))
+        self.write_job()
+        job = hf_job.parse(self.jobfile.read_bytes(), self.args.approved_sha256)
+        work = self.root / "pod"
+        work.mkdir()
+        hub = Mock()
+        hub.download.return_value = self.source
+        commits = []
+
+        def commit(output, prefix, receipt, files):
+            commits.append((json.loads(json.dumps(receipt)), {file.name: file.read_bytes() for file in files}))
+
+        hub.commit.side_effect = commit
+        receipt = {"schema": hf_job.TELEMETRY_RECEIPT, "run_id": "20990101-000000-abcd",
+                   "pod_id": "pod-example", "job_sha256": self.args.approved_sha256,
+                   "clean_sha256": job["clean_sha256"], "started_utc": "2099-01-01T00:00:00+00:00",
+                   "finished_utc": None, "status": "running", "snapshots": []}
+        status = hf_train_pod.train(job, work, hub, receipt)
+        hf_train.validate_receipt(receipt, receipt["run_id"], receipt["pod_id"], {
+            **job, "job_sha256": self.args.approved_sha256,
+        })
+        return status, commits
+
+    def test_telemetry_checkpoints_commit_with_companions_then_closed_logs(self):
+        status, commits = self.run_telemetry_job(
+            "echo 'entrypoint beginning'\n"
+            "printf snapshot > out/model.traineddata\n"
+            "printf '{}' > out/model.training-metrics.json\n"
+            "printf phase > out/model.trainer.log\n"
+            "printf setup > out/setup.log\n"
+            "echo 'entrypoint finished'\n"
+        )
+        self.assertEqual(status, "ok")
+        self.assertEqual([receipt["status"] for receipt, _ in commits], ["running", "ok"])
+        self.assertEqual(set(commits[0][1]), {"model.traineddata", "model.training-metrics.json", "model.trainer.log"})
+        final, logs = commits[1]
+        self.assertEqual(set(logs), {"setup.log", "training.log"})
+        self.assertTrue(logs["training.log"].endswith(b"entrypoint finished\n"))
+        for entry in final["snapshots"]:
+            data = (commits[0][1] | logs)[entry["name"]]
+            self.assertEqual((entry["size"], entry["sha256"]), (len(data), hf_job.digest(data)))
+
+    def test_incomplete_checkpoint_is_not_uploaded_but_failure_logs_are(self):
+        status, commits = self.run_telemetry_job(
+            "printf snapshot > out/model.traineddata\n"
+            "printf partial > out/partial.trainer.log\n"
+            "echo 'entrypoint failed' >&2\nexit 3\n"
+        )
+        self.assertEqual(status, "failed")
+        (receipt, files), = commits
+        self.assertEqual(set(files), {"partial.trainer.log", "training.log"})
+        self.assertEqual({entry["name"] for entry in receipt["snapshots"]}, set(files))
+
+    def test_collector_rejects_incomplete_checkpoint_and_success_without_run_log(self):
+        _, commits = self.run_telemetry_job(
+            "printf snapshot > out/model.traineddata\n"
+            "printf '{}' > out/model.training-metrics.json\n"
+            "printf phase > out/model.trainer.log\n"
+        )
+        receipt = commits[1][0]
+        reserve = {**self.job, "job_sha256": self.args.approved_sha256}
+        for missing, error in [("model.trainer.log", "incomplete checkpoint group"),
+                               ("training.log", "missing committed outputs")]:
+            with self.subTest(missing=missing), self.assertRaisesRegex(ValueError, error):
+                broken = {**receipt, "snapshots": [e for e in receipt["snapshots"] if e["name"] != missing]}
+                hf_train.validate_receipt(broken, receipt["run_id"], receipt["pod_id"], reserve)
 
     def test_mismatched_input_fails_before_training(self):
         hub = Mock()
