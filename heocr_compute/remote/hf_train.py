@@ -4,13 +4,14 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import os
 import re
 import shutil
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import budget, hf_job
+from . import budget, hf_job, r2_input
 from .api import RunPodError, load_hf_token
 from .policy import Policy, Refused
 from .runner import (DEFAULT_CAPACITY_WAIT_HOURS, HF_PROFILE_MARKER, Runner, new_run_id, observe_startup, pod_name,
@@ -23,9 +24,11 @@ STARTUP_POLL_SECONDS = 10
 def check_hub_inputs(job):
     policy = Policy.load()
     for item in job["inputs"]:
-        for path in (f"hf/{item['repo']}/{item['path']}", f"/heocr/in/{item['target']}"):
+        source = (f"r2/{r2_input.BUCKET}/{item['path']}" if item.get("transport") == "r2"
+                  else f"hf/{item['repo']}/{item['path']}")
+        for path in (source, f"/heocr/in/{item['target']}"):
             if policy.deny_reason(path):
-                raise Refused("a Hub input matches the local denylist")
+                raise Refused("a training input matches the local denylist")
             policy.check_hash(path, item["sha256"])
 
 
@@ -65,6 +68,8 @@ def launch(a, profile, api, ledger):
         raise ValueError("could not read the approved training job file") from None
     job = hf_job.parse(raw, a.approved_sha256)
     repo_scope = getattr(a, "hf_repo_scope", None)
+    if any(item.get("transport") == "r2" for item in job["inputs"]):
+        hf_job.require(repo_scope is not None, "presigned R2 inputs require --hf-repo-scope")
     if job["image"].startswith(KRAKEN_TRAIN_IMAGE):
         hf_job.require(repo_scope is not None, "Kraken training image requires --hf-repo-scope")
         hf_job.require(profile.kind == "cpu", "Kraken training image requires a CPU profile")
@@ -91,12 +96,14 @@ def launch(a, profile, api, ledger):
     check_hub_inputs(job)
 
     runner = Runner(api, ledger)
+    urls = r2_input.read_urls(job, os.environ.get(r2_input.ENV), now=runner.now(),
+                              min_remaining=startup_minutes * 60)
     run_id = new_run_id(runner.now())
     name = pod_name(HF_PROFILE_MARKER, run_id)
     spec = SimpleNamespace(profile=profile, hours=a.hours, run_cap=a.run_cap, month_cap=a.month_cap,
                            dry_run=a.dry_run, yes=a.yes,
                            capacity_wait_hours=getattr(a, "capacity_wait_hours", DEFAULT_CAPACITY_WAIT_HOURS))
-    print(f"Hub inputs: {len(job['inputs'])} files, {total:,} bytes. Job spec: {len(raw):,} bytes.")
+    print(f"Pinned inputs: {len(job['inputs'])} files, {total:,} bytes. Job spec: {len(raw):,} bytes.")
     with runner.launch_slot(spec, run_id) as (quote, waited):
         if quote is None:
             return 0
@@ -106,6 +113,10 @@ def launch(a, profile, api, ledger):
         if waited:
             check_hub_inputs(job)
         reserved = runner.now()
+        if urls:
+            for item in job["inputs"]:
+                if item.get("transport") == "r2":
+                    r2_input.check_url(item, urls[item["target"]], now=reserved, min_remaining=startup_minutes * 60)
         deadline = reserved + dt.timedelta(hours=a.hours)
         startup_deadline = min(deadline, reserved + dt.timedelta(minutes=startup_minutes))
         telemetry = {"telemetry": job["telemetry"]} if "telemetry" in job else {}
@@ -123,6 +134,8 @@ def launch(a, profile, api, ledger):
     }
     if repo_scope is not None:
         env["HEOCR_HF_REPO_SCOPE"] = repo_scope
+    if urls:
+        env[r2_input.ENV] = json.dumps(urls, separators=(",", ":"))
     if "telemetry" in job:
         env["HEOCR_HF_FINALIZE_LOGS"] = "1"
     body = profile.body(name, env)

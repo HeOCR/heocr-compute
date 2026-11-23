@@ -16,6 +16,7 @@ MAX_SPEC = 24 * 1024
 HUB = "https://huggingface.co"
 SHA = re.compile(r"[0-9a-f]{64}")
 REVISION = re.compile(r"[0-9a-f]{40}")
+R2_ACCOUNT = re.compile(r"[0-9a-f]{32}")
 REPO = re.compile(r"HeOCR/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}")
 RUN_ID = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{4}")
 POD_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
@@ -94,6 +95,7 @@ def parse(raw, approved):
     require(len(raw) <= MAX_SPEC and matches(SHA, approved) and digest(raw) == approved,
             "job exceeds size limit or differs from the approved SHA-256")
     require(not re.search(rb"\bhf_[a-zA-Z0-9]{20,}\b", raw), "job must not contain a Hub token")
+    require(b"x-amz-signature" not in raw.lower(), "job must not contain any presigned URLs")
     job = json.loads(raw.decode("utf-8"))
     require(isinstance(job, dict) and job.get("schema") in (SCHEMA, TELEMETRY_SCHEMA),
             "expected an autonomous training job schema")
@@ -110,18 +112,29 @@ def parse(raw, approved):
     location(job["output"])
     require(isinstance(job["inputs"], list) and job["inputs"], "job has no pinned inputs")
     targets = set()
+    hub_targets = set()
     for item in job["inputs"]:
-        fields(item, "repo type revision path target size sha256")
-        location(item)
+        is_r2 = isinstance(item, dict) and item.get("transport") == "r2"
+        if is_r2:
+            fields(item, "transport account path target size sha256")
+            require(telemetry_enabled and matches(R2_ACCOUNT, item["account"]),
+                    "R2 archives require a v2 job and an exact account")
+        else:
+            fields(item, "repo type revision path target size sha256")
+            location(item)
+            require(matches(REVISION, item["revision"]), "Hub input requires a full revision")
         safe_path(item["path"])
         target = safe_path(item["target"])
-        require(matches(REVISION, item["revision"]) and matches(SHA, item["sha256"])
-                and size_ok(item["size"]), "input requires a full revision, byte size and SHA-256")
+        require(matches(SHA, item["sha256"]) and size_ok(item["size"]), "input requires byte size and SHA-256")
+        if is_r2:
+            require(item["path"].endswith(".tar") and target.endswith(".tar"), "R2 inputs must be TRAIN archives")
+        else:
+            hub_targets.add(target)
         require(target not in targets and all(not target.startswith(t + "/") and not t.startswith(target + "/")
                                               for t in targets), "input destinations overlap")
         targets.add(target)
     entrypoint = safe_path(job["entrypoint"])
-    require(entrypoint.endswith(".sh") and entrypoint in targets, "entrypoint must be a pinned shell input")
+    require(entrypoint.endswith(".sh") and entrypoint in hub_targets, "entrypoint must be a pinned Hub shell input")
     require(isinstance(job["args"], list) and all(isinstance(a, str) and a.isprintable()
                                                 for a in job["args"]), "invalid entrypoint arguments")
     require(isinstance(job["snapshots"], list) and job["snapshots"], "declare at least one snapshot")
@@ -144,8 +157,8 @@ def parse(raw, approved):
 def check_repo_scope(job, repo):
     """Require every Hub operation in a job to use one operator-approved dataset."""
     require(matches(REPO, repo), "training worker requires one approved HeOCR dataset")
-    require(all(record["repo"] == repo and record["type"] == "dataset"
-                for record in (*job["inputs"], job["output"])),
+    pins = (record for record in (*job["inputs"], job["output"]) if record.get("transport") != "r2")
+    require(all(record["repo"] == repo and record["type"] == "dataset" for record in pins),
             "job is outside its approved Hub dataset scope")
 
 

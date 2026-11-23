@@ -33,6 +33,12 @@ The lead approves the SHA-256 of the exact UTF-8 specification after checking th
 
 The operator configures a Runpod managed secret containing a fine-grained Hub token with read access to the named input repos and write access to the one private output repo. Use the secret's **name** for launch. Runpod injects the value into the pod environment. Keep token values out of job files and flags. The supervisor omits credentials from the child job environment. The training entrypoint is reviewed and runs as trusted code inside the dedicated pod. Keep the output repository private through collection. [Runpod managed secrets](https://docs.runpod.io/pods/templates/secrets)
 
+### Approved R2 TRAIN archives
+
+A v2 job can declare an approved TRAIN archive from the private `heocr-train-private` bucket. Its input record has `transport: "r2"`, the 32-hex Cloudflare `account`, the exact object key in `path`, a relative archive `target`, and the expected `size` and `sha256`. Both paths end in `.tar`. Bind these fields into the job approval. Supply `--hf-repo-scope` for the private dataset that holds the entrypoint, other Hub inputs and all outputs.
+
+Generate an object-scoped [presigned GET](https://developers.cloudflare.com/r2/api/s3/presigned-urls/) from local credentials with a lifetime of at most 24 hours. Pass `HEOCR_R2_URLS` as an in-memory secret environment variable containing a JSON mapping from each R2 target to its URL. Keep it out of job specs, command arguments, shell traces and ledgers. Refresh a URL if it expires while a job is queued. The supervisor consumes the variable before starting the trainer. It refuses redirects and checks byte size and SHA-256 before making the archive visible to the trainer.
+
 ## Worker and launch
 
 Build the Linux AMD64 image with the repository Dockerfile. It defaults to a pinned Runpod base and installs the checksum-pinned official `runpodctl` binary. An approved replacement base can be passed by digest. The service supplies the pod-scoped credentials at startup. Use the resulting deployed digest in the job specification. For a trainer with additional dependencies, bake those into the reviewed worker before pinning it.
