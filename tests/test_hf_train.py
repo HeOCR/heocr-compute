@@ -200,6 +200,71 @@ class HfTrainTest(unittest.TestCase):
         self.assertEqual(self.launch_with_clock(["gone"]), 0)
         self.api.terminate.assert_not_called()
 
+    def require_worker_receipt(self):
+        self.args.require_worker_receipt = True
+        self.args.hf_repo_scope = "HeOCR/example-input"
+        self.job["output"] = {"repo": self.args.hf_repo_scope, "type": "dataset"}
+        self.job["schema"] = hf_job.TELEMETRY_SCHEMA
+        self.job["telemetry"] = dict.fromkeys(
+            ("metrics_max_bytes", "trainer_log_max_bytes", "run_log_max_bytes", "setup_log_max_bytes"), 500
+        )
+        self.write_job()
+
+    def test_runtime_only_does_not_satisfy_worker_receipt_gate(self):
+        self.require_worker_receipt()
+        self.api.get_pod.return_value = None
+        self.api.billed_usd.return_value = None
+        with (patch.object(hf_train, "load_hf_token", return_value="invented"),
+              patch.object(hf_job, "Hub"),
+              patch.object(hf_train, "read_worker_startup", return_value=None) as receipt):
+            with self.assertRaisesRegex(ValueError, "without a verified worker receipt"):
+                self.launch_with_clock(["running", "running", "running"])
+        self.assertEqual(receipt.call_count, 3)
+        self.api.terminate.assert_called_once_with("pod-example")
+        run, = self.ledger.runs().values()
+        self.assertTrue(run["reserve"]["worker_receipt_required"])
+        self.assertEqual(run["startup"]["status"], "startup_timeout")
+
+    def test_launch_waits_for_matching_worker_receipt_and_passes_opt_in(self):
+        self.require_worker_receipt()
+        with (patch.object(hf_train, "load_hf_token", return_value="invented"),
+              patch.object(hf_job, "Hub"),
+              patch.object(hf_train, "read_worker_startup", side_effect=(None, "running")) as receipt):
+            self.assertEqual(self.launch_with_clock(["running", "running"]), 0)
+        self.assertEqual(receipt.call_count, 2)
+        body, = self.api.create_pod.call_args.args
+        self.assertEqual(body["env"]["HEOCR_HF_PUBLISH_STARTUP"], "1")
+        self.assertNotIn("invented", json.dumps(body))
+        self.api.terminate.assert_not_called()
+
+    def test_worker_receipt_identity_is_bound_to_job_and_pod(self):
+        self.require_worker_receipt()
+        run_id = "20990101-000000-abcd"
+        data = self.root / "receipt.json"
+        receipt = {"schema": hf_job.TELEMETRY_RECEIPT, "run_id": run_id, "pod_id": "pod-example",
+                   "job_sha256": self.args.approved_sha256, "clean_sha256": self.job["clean_sha256"],
+                   "status": "running", "started_utc": "2099-01-01T00:00:00+00:00",
+                   "finished_utc": None, "snapshots": []}
+        data.write_text(json.dumps(receipt))
+        with patch.object(hf_job, "Hub") as hub:
+            hub.return_value.find_receipt.return_value = data
+            reserve = {**self.job, "job_sha256": self.args.approved_sha256}
+            self.assertEqual(hf_train.read_worker_startup("invented", run_id, "pod-example", reserve), "running")
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                hf_train.read_worker_startup("invented", run_id, "different-pod", reserve)
+
+    def test_worker_receipt_launch_rejects_r2_url_expiring_before_deadline(self):
+        _, url = self.r2_fixture()
+        self.args.require_worker_receipt = True
+        self.args.hours = 2
+        env = {r2_input.ENV: json.dumps({"exact.tar": url})}
+        with (patch.dict(os.environ, env), patch.object(Policy, "load", return_value=Policy()),
+              patch.object(hf_train, "load_hf_token", return_value="invented"), patch.object(hf_job, "Hub")):
+            with self.assertRaisesRegex(ValueError, "expired or mismatched"):
+                hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger)
+        self.api.create_pod.assert_not_called()
+        self.assertEqual(self.ledger.events(), [])
+
     def test_sweep_recovers_expired_startup_watch(self):
         now = dt.datetime(2099, 1, 1, 1, tzinfo=dt.timezone.utc)
         self.ledger.now = lambda: now
@@ -218,6 +283,36 @@ class HfTrainTest(unittest.TestCase):
         self.assertEqual(sweep(self.api, self.ledger, now=lambda: now, out=lambda _: None), ["pod-example"])
         self.api.terminate.assert_called_once_with("pod-example")
         self.assertEqual(self.ledger.runs()[run_id]["final"]["usd"], 0.02)
+
+    def test_sweep_rechecks_required_worker_receipt_after_launcher_exit(self):
+        now = dt.datetime(2099, 1, 1, 1, tzinfo=dt.timezone.utc)
+        self.ledger.now = lambda: now
+        run_id = "20990101-004000-abcd"
+        self.ledger.reserve(run_id, autonomous=True, usd_est=0.5, pod_type="smoke", worker_receipt_required=True,
+                            deadman_utc="2099-01-01T02:00:00+00:00", startup_deadline_utc="2099-01-01T00:55:00+00:00")
+        self.ledger.pod(run_id, pod_id="pod-example", created_utc="2099-01-01T00:40:00+00:00")
+        self.api.list_pods.return_value = [{"id": "pod-example", "name": "heocr-hf-" + run_id}]
+        self.api.pod_startup_state.return_value = "running"
+        self.api.get_pod.return_value = None
+        self.api.billed_usd.return_value = None
+        with (patch("heocr_compute.remote.api.load_hf_token", return_value="invented"),
+              patch.object(hf_train, "read_worker_startup", side_effect=[ValueError, None])):
+            self.assertEqual(sweep(self.api, self.ledger, now=lambda: now, out=lambda _: None), [])
+            self.api.terminate.assert_not_called()
+            self.assertEqual(sweep(self.api, self.ledger, now=lambda: now, out=lambda _: None), ["pod-example"])
+        self.api.terminate.assert_called_once_with("pod-example")
+
+    def test_hub_publish_failure_exposes_http_status_without_response_body(self):
+        hub = object.__new__(hf_job.Hub)
+        hub.api = Mock()
+        hub.private_revision = Mock(return_value="4" * 40)
+        hub.add = Mock()
+        error = RuntimeError("invented-sensitive-response")
+        error.response = SimpleNamespace(status_code=403)
+        hub.api.create_commit.side_effect = error
+        with self.assertRaisesRegex(hf_job.PublishError, "HTTP 403") as caught:
+            hub.commit(self.job["output"], "runs/example", {"run_id": "20990101-000000-abcd"})
+        self.assertNotIn("invented-sensitive-response", str(caught.exception))
 
     def test_startup_minutes_cannot_exceed_quoted_allowance(self):
         self.args.startup_minutes = 16
@@ -442,6 +537,31 @@ class HfTrainTest(unittest.TestCase):
             data = (commits[0][1] | logs)[entry["name"]]
             self.assertEqual((entry["size"], entry["sha256"]), (len(data), hf_job.digest(data)))
 
+    def test_startup_receipt_precedes_inputs_and_failure_keeps_redacted_phase(self):
+        self.require_worker_receipt()
+        hub = Mock()
+        commits = []
+
+        def commit(output, prefix, receipt, files=()):
+            commits.append((receipt["status"], {file.name: file.read_bytes() for file in files}))
+
+        def refuse_input(*args):
+            self.assertEqual(commits, [("running", {})])
+            raise ValueError("invented-sensitive-response")
+
+        hub.commit.side_effect = commit
+        hub.download.side_effect = refuse_input
+        root = self.root / "pod"
+        root.mkdir()
+        receipt = {"run_id": "20990101-000000-abcd", "status": "running", "snapshots": []}
+        with contextlib.redirect_stdout(io.StringIO()) as stdout:
+            self.assertEqual(hf_train_pod.train(self.job, root, hub, receipt, publish_startup=True), "failed")
+        self.assertEqual([status for status, _ in commits], ["running", "failed"])
+        log = commits[1][1]["training.log"]
+        self.assertIn(b"Downloading a pinned private Hub input.", log)
+        self.assertNotIn(b"invented-sensitive-response", log)
+        self.assertNotIn("invented-sensitive-response", stdout.getvalue())
+
     def test_incomplete_checkpoint_is_not_uploaded_but_failure_logs_are(self):
         status, commits = self.run_telemetry_job(
             "printf snapshot > out/model.traineddata\n"
@@ -506,7 +626,8 @@ class HfTrainTest(unittest.TestCase):
         }))
         hub = Mock()
         hub.private_revision.return_value = "4" * 40
-        hub.download.side_effect = [receipt, self.source]
+        hub.find_receipt.return_value = receipt
+        hub.download.return_value = self.source
         self.api.list_pods.return_value = []
         self.api.get_pod.return_value = None
         self.api.billed_usd.return_value = 0.01
@@ -516,6 +637,36 @@ class HfTrainTest(unittest.TestCase):
             self.assertEqual(hf_train.collect(args, self.api, self.ledger), 0)
         self.assertEqual((args.results / run_id / "model.traineddata").read_bytes(), self.source.read_bytes())
         self.assertEqual(self.ledger.runs()[run_id]["final"]["usd"], 0.01)
+
+    def test_collect_reconciles_positive_bill_for_gone_pod_without_receipt(self):
+        run_id = "20990101-000000-abcd"
+        self.ledger.reserve(run_id, autonomous=True, usd_est=0.5, pod_type="smoke",
+                            deadman_utc="2099-01-01T01:00:00+00:00", output=self.job["output"])
+        self.ledger.pod(run_id, pod_id="pod-example", created_utc="2020-01-01T00:00:00Z")
+        self.api.get_pod.return_value = None
+        self.api.billed_usd.side_effect = (0.0, 0.11)
+        hub = Mock()
+        hub.private_revision.return_value = "4" * 40
+        hub.find_receipt.return_value = None
+        args = SimpleNamespace(run_id=run_id, results=self.root / "collected")
+        with (patch.object(hf_train, "load_hf_token", return_value="invented"),
+              patch.object(hf_job, "Hub", return_value=hub), contextlib.redirect_stdout(io.StringIO())):
+            self.assertEqual(hf_train.collect(args, self.api, self.ledger), 1)
+            self.assertNotIn("final", self.ledger.runs()[run_id])
+            self.assertEqual(hf_train.collect(args, self.api, self.ledger), 1)
+        final = self.ledger.runs()[run_id]["final"]
+        self.assertEqual((final["status"], final["usd"]), ("missing_receipt", 0.11))
+        self.assertEqual(final["hours_source"], "observation_or_deadline_bound")
+        self.assertFalse((args.results / run_id).exists())
+
+    def test_receipt_lookup_does_not_treat_network_error_as_missing(self):
+        hub = object.__new__(hf_job.Hub)
+        hub.api = Mock()
+        hub.api.get_paths_info.side_effect = ([], OSError("invented-sensitive-response"))
+        self.assertIsNone(hub.find_receipt(self.job["output"], "runs/example", "4" * 40))
+        with self.assertRaisesRegex(ValueError, "could not check the private Hub receipt path") as caught:
+            hub.find_receipt(self.job["output"], "runs/example", "4" * 40)
+        self.assertNotIn("invented-sensitive-response", str(caught.exception))
 
     def test_expired_entrypoint_self_terminates_without_logging_provider_output(self):
         bindir = self.root / "bin"

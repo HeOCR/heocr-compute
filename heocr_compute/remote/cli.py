@@ -268,6 +268,8 @@ def main(argv=None) -> int:
     train.add_argument("--hours", type=float, required=True)
     train.add_argument("--startup-minutes", type=float, default=budget.STARTUP_HOURS * 60,
                        help="minutes to wait for container runtime, up to the quoted 15-minute allowance")
+    train.add_argument("--require-worker-receipt", action="store_true",
+                       help="require a matching private Hub startup receipt from the pinned worker image")
     train.add_argument("--run-cap", type=float, required=True)
     train.add_argument("--month-cap", type=float, default=budget.MONTH_CAP_USD)
     train.add_argument("--dry-run", action="store_true")
