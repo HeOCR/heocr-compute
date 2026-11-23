@@ -32,16 +32,43 @@ def check_hub_inputs(job):
             policy.check_hash(path, item["sha256"])
 
 
-def watch_startup(runner, run_id, pod_id, deadline):
+def read_worker_startup(token, run_id, pod_id, reserve):
+    output = reserve["output"]
+    with tempfile.TemporaryDirectory(prefix="heocr-worker-receipt-") as cache:
+        hub = hf_job.Hub(token, Path(cache))
+        revision = hub.private_revision(output)
+        path = hub.find_receipt(output, f"runs/{run_id}", revision)
+        if path is None:
+            return None
+        receipt = json.loads(path.read_bytes())
+        validate_receipt(receipt, run_id, pod_id, reserve)
+        return receipt["status"]
+
+
+def watch_startup(runner, run_id, pod_id, deadline, token=None):
     """Monitor provisioning from the account side until the pod starts or the wait expires."""
+    reserve = runner.ledger.runs()[run_id]["reserve"] if token is not None else None
     while True:
         expired = runner.now() >= deadline
         state = observe_startup(runner.api, pod_id)
         if state == "running":
-            record_startup(runner.ledger, run_id, pod_id, state=state)
-            print(f"Pod {pod_id} will pull verified inputs and publish results without a local supervisor.")
-            return 0
+            receipt_status = "running" if token is None else None
+            if token is not None:
+                try:
+                    receipt_status = read_worker_startup(token, run_id, pod_id, reserve)
+                except (OSError, ValueError):
+                    print("Worker receipt is not yet readable and verified.", flush=True)
+            if receipt_status == "failed":
+                raise ValueError(f"pod {pod_id} published a failure receipt during startup; collect after teardown")
+            if receipt_status in ("running", "ok"):
+                record_startup(runner.ledger, run_id, pod_id, state=state)
+                if token is not None:
+                    print("Verified the pod worker's private Hub startup receipt.")
+                print(f"Pod {pod_id} will pull verified inputs and publish results without a local supervisor.")
+                return 0
         if state == "gone":
+            if token is not None:
+                raise ValueError(f"pod {pod_id} exited before a worker receipt was verified; collect the run")
             print(f"Pod {pod_id} already left the account. Use collect-hf to check for a receipt.")
             return 0
         if expired:
@@ -57,6 +84,8 @@ def watch_startup(runner, run_id, pod_id, deadline):
     run = runner.ledger.runs()[run_id]
     if not reconcile_startup_cost(runner.api, runner.ledger, run, now=runner.now):
         print("Provider billing is pending. The estimate remains reserved until a later sweep.")
+    if state == "running" and token is not None:
+        raise ValueError(f"pod {pod_id} was terminated after its startup deadline without a verified worker receipt")
     raise ValueError(f"pod {pod_id} was terminated after its startup deadline without a container runtime")
 
 
@@ -96,8 +125,19 @@ def launch(a, profile, api, ledger):
     check_hub_inputs(job)
 
     runner = Runner(api, ledger)
-    urls = r2_input.read_urls(job, os.environ.get(r2_input.ENV), now=runner.now(),
-                              min_remaining=startup_minutes * 60)
+    require_worker_receipt = getattr(a, "require_worker_receipt", False)
+    startup_token = None
+    if require_worker_receipt:
+        hf_job.require(repo_scope is not None, "worker receipt verification requires --hf-repo-scope")
+        hf_job.require("telemetry" in job, "worker receipt verification requires the telemetry job schema")
+        startup_token = load_hf_token()
+        with tempfile.TemporaryDirectory(prefix="heocr-worker-receipt-") as cache:
+            try:
+                hf_job.Hub(startup_token, Path(cache)).private_revision(job["output"])
+            except ImportError:
+                raise ValueError("install the Hub client with pip install '.[render]'") from None
+    url_seconds = max(startup_minutes * 60, a.hours * 3600 if require_worker_receipt else 0)
+    urls = r2_input.read_urls(job, os.environ.get(r2_input.ENV), now=runner.now(), min_remaining=url_seconds)
     run_id = new_run_id(runner.now())
     name = pod_name(HF_PROFILE_MARKER, run_id)
     spec = SimpleNamespace(profile=profile, hours=a.hours, run_cap=a.run_cap, month_cap=a.month_cap,
@@ -116,10 +156,12 @@ def launch(a, profile, api, ledger):
         if urls:
             for item in job["inputs"]:
                 if item.get("transport") == "r2":
-                    r2_input.check_url(item, urls[item["target"]], now=reserved, min_remaining=startup_minutes * 60)
+                    r2_input.check_url(item, urls[item["target"]], now=reserved, min_remaining=url_seconds)
         deadline = reserved + dt.timedelta(hours=a.hours)
         startup_deadline = min(deadline, reserved + dt.timedelta(minutes=startup_minutes))
         telemetry = {"telemetry": job["telemetry"]} if "telemetry" in job else {}
+        if require_worker_receipt:
+            telemetry["worker_receipt_required"] = True
         ledger.reserve(run_id, profile=profile.name, pod_type=profile.pod_type, vcpus=profile.vcpus,
                        usd_est=quote.usd_est, hours_max=quote.hours, deadman_utc=deadline.isoformat(),
                        startup_deadline_utc=startup_deadline.isoformat(), autonomous=True,
@@ -138,6 +180,8 @@ def launch(a, profile, api, ledger):
         env[r2_input.ENV] = json.dumps(urls, separators=(",", ":"))
     if "telemetry" in job:
         env["HEOCR_HF_FINALIZE_LOGS"] = "1"
+    if require_worker_receipt:
+        env["HEOCR_HF_PUBLISH_STARTUP"] = "1"
     body = profile.body(name, env)
     body.update(image=job["image"], ports=[], startSsh=False)
     if registry is not None:
@@ -159,7 +203,7 @@ def launch(a, profile, api, ledger):
         terminate_confirmed(api, pod_id)
         raise ValueError("unverified or higher billed rate; reconcile the pod and reservation")
     print(f"Pod {pod_id} created. Waiting for container runtime until {startup_deadline.isoformat()}.", flush=True)
-    return watch_startup(runner, run_id, pod_id, startup_deadline)
+    return watch_startup(runner, run_id, pod_id, startup_deadline, token=startup_token)
 
 
 def validate_receipt(receipt, run_id, pod_id, reserve):
@@ -212,6 +256,33 @@ def materialize(hub, output, prefix, revision, receipt, destination, cache):
     staging.rename(destination)
 
 
+def settle_collection(api, ledger, run_id, run, pod_id, revision, receipt):
+    old = run.get("final")
+    if old and (old["status"] != "missing_receipt" or receipt is None):
+        return
+    reserve, pod = run["reserve"], run.get("pod", {})
+    start = pod.get("created_utc") or pod.get("date") or reserve["date"]
+    now = dt.datetime.now(dt.timezone.utc)
+    usd = api.billed_usd(pod_id, start, now.isoformat())
+    if usd is None or not math.isfinite(usd) or usd <= 0:
+        print("Provider billing is pending. The estimate remains reserved.")
+        return
+    since = dt.datetime.fromisoformat(start.replace("Z", "+00:00"))
+    finished = receipt and receipt["finished_utc"]
+    if finished:
+        finish = dt.datetime.fromisoformat(finished)
+    else:
+        finish = min(now, dt.datetime.fromisoformat(reserve["deadman_utc"]))
+    status = "missing_receipt" if receipt is None else receipt["status"]
+    with ledger.locked():
+        if ledger.runs()[run_id].get("final") == old:
+            ledger.final(run_id, pod_type=reserve["pod_type"],
+                         hours=max(0, (finish - since).total_seconds() / 3600), usd=usd,
+                         status="incomplete" if status == "running" else status, pod_id=pod_id,
+                         hub_revision=revision, usd_source="provider_billing",
+                         hours_source="worker_receipt" if finished else "observation_or_deadline_bound")
+
+
 def collect(a, api, ledger):
     run_id = a.run_id
     hf_job.require(hf_job.matches(hf_job.RUN_ID, run_id), "invalid run ID")
@@ -243,7 +314,12 @@ def collect(a, api, ledger):
         output = reserve["output"]
         revision = hub.private_revision(output)
         prefix = f"runs/{run_id}"
-        data = hub.download(output, f"{prefix}/receipt.json", revision, hf_job.MAX_SPEC)
+        data = hub.find_receipt(output, prefix, revision)
+        if data is None:
+            hf_job.require(pod_id is not None, "no private Hub receipt and no confirmed pod ID for the reservation")
+            settle_collection(api, ledger, run_id, run, pod_id, revision, None)
+            print(f"Pod {pod_id} is gone and no receipt was found in the verified private Hub revision {revision}.")
+            return 1
         receipt = json.loads(data.read_bytes())
         if not pod_id:
             pod_id = receipt.get("pod_id")
@@ -255,20 +331,6 @@ def collect(a, api, ledger):
         validate_receipt(receipt, run_id, pod_id, reserve)
         dest = results / run_id
         materialize(hub, output, prefix, revision, receipt, dest, root)
-    if "final" not in run:
-        start = pod_record.get("created_utc") or pod_record.get("date") or reserve["date"]
-        end = dt.datetime.now(dt.timezone.utc).isoformat()
-        usd = api.billed_usd(pod_id, start, end)
-        if usd is not None and math.isfinite(usd) and usd > 0:
-            since = dt.datetime.fromisoformat(start.replace("Z", "+00:00"))
-            finish = receipt["finished_utc"] or reserve["deadman_utc"]
-            hours = max(0, (dt.datetime.fromisoformat(finish) - since).total_seconds() / 3600)
-            with ledger.locked():
-                if "final" not in ledger.runs()[run_id]:
-                    ledger.final(run_id, pod_type=reserve["pod_type"], hours=hours, usd=usd,
-                                 status=receipt["status"] if receipt["status"] != "running" else "incomplete",
-                                 pod_id=pod_id, hub_revision=revision)
-        else:
-            print("Provider billing is pending. The estimate remains reserved.")
+    settle_collection(api, ledger, run_id, run, pod_id, revision, receipt)
     print(f"Collected {len(receipt['snapshots'])} verified outputs from {revision} into {dest}.")
     return 0 if receipt["status"] == "ok" else 1

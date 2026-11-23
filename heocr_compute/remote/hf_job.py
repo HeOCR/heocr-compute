@@ -196,8 +196,24 @@ class Hub:
         except Exception:
             raise ValueError("could not download a bounded file from the pinned Hub revision") from None
 
+    def find_receipt(self, output, prefix, revision):
+        """Return None only after a successful lookup of the exact private receipt path."""
+        name = f"{prefix}/receipt.json"
+        try:
+            entries = self.api.get_paths_info(output["repo"], [name], repo_type=output["type"], revision=revision)
+        except Exception:
+            raise ValueError("could not check the private Hub receipt path") from None
+        if entries == []:
+            return None
+        require(isinstance(entries, list) and len(entries) == 1 and getattr(entries[0], "path", None) == name,
+                "unexpected private Hub receipt path")
+        path = self.download(output, name, revision, MAX_SPEC)
+        require(0 < path.stat().st_size <= MAX_SPEC, "unexpected private Hub receipt size")
+        return path
+
     def commit(self, output, prefix, receipt, artifacts=()):
         # Optimistic parent pins protect concurrent runs writing to the same private repository.
+        http_status = None
         for _ in range(3):
             try:
                 parent = self.private_revision(output)
@@ -215,6 +231,8 @@ class Hub:
             except KeyboardInterrupt:
                 raise PublishError("private Hub commit was interrupted during publication") from None
             except Exception as exc:
-                if getattr(getattr(exc, "response", None), "status_code", None) not in (409, 412):
+                http_status = getattr(getattr(exc, "response", None), "status_code", None)
+                if http_status not in (409, 412):
                     break
-        raise PublishError("private Hub snapshot commit could not be confirmed") from None
+        detail = f" (HTTP {http_status})" if type(http_status) is int and 400 <= http_status <= 599 else ""
+        raise PublishError(f"private Hub snapshot commit could not be confirmed{detail}") from None

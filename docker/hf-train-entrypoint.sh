@@ -25,6 +25,7 @@ terminate_pod() {
 
 remaining=$((HEOCR_HF_DEADLINE - $(date +%s)))
 if [ "$remaining" -le 0 ]; then
+    echo 'Training deadline already elapsed; requesting pod termination.' >&2
     terminate_pod
     exit 1
 fi
@@ -33,6 +34,8 @@ fi
 (sleep "$remaining"; terminate_pod) </dev/null >/dev/null 2>&1 &
 watchdog=$!
 finish() {
+    status=$?
+    echo "Training supervisor exited with status $status; requesting pod termination." >&2
     if terminate_pod; then
         kill "$watchdog" 2>/dev/null || true
     else
@@ -52,4 +55,5 @@ worker_seconds=$((remaining - shutdown_seconds))
 # The provider base enables the optional hf_transfer backend, which this worker does not install.
 export HF_HUB_ENABLE_HF_TRANSFER=0
 export HF_HUB_DISABLE_TELEMETRY=1 HF_HUB_DISABLE_IMPLICIT_TOKEN=1
+echo 'Starting training supervisor with bounded shutdown.' >&2
 timeout -s TERM -k "${kill_seconds}s" "$worker_seconds" /opt/heocr-venv/bin/python -m heocr_compute.remote.hf_train_pod
