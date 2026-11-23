@@ -33,6 +33,17 @@ The lead approves the SHA-256 of the exact UTF-8 specification after checking th
 
 The operator configures a Runpod managed secret containing a fine-grained Hub token with read access to the named input repos and write access to the one private output repo. Use the secret's **name** for launch. Runpod injects the value into the pod environment. Keep token values out of job files and flags. The supervisor omits credentials from the child job environment. The training entrypoint is reviewed and runs as trusted code inside the dedicated pod. Keep the output repository private through collection. [Runpod managed secrets](https://docs.runpod.io/pods/templates/secrets)
 
+### Approved public Hub TRAIN archives
+
+Use public TRAIN archives in v2 jobs after independent publication review. Add
+`transport: "hf-public"` and `release_sha256` to each archive's Hub input record.
+Both the source and target paths must end in `.tar`. Bind the exact release
+receipt, immutable dataset revision, byte size and SHA-256 into the approved job.
+Supply `--hf-public-train-repo HeOCR/example-open-data` for each public source
+and `--hf-repo-scope` for the single private dataset that holds the entrypoint,
+other private inputs and all outputs. The worker verifies public visibility and
+downloads these archives anonymously. Use a worker image built with this support.
+
 ### Approved R2 TRAIN archives
 
 A v2 job can declare an approved TRAIN archive from the private `heocr-train-private` bucket. Its input record has `transport: "r2"`, the 32-hex Cloudflare `account`, the exact object key in `path`, a relative archive `target`, and the expected `size` and `sha256`. Both paths end in `.tar`. Bind these fields into the job approval. Supply `--hf-repo-scope` for the private dataset that holds the entrypoint, other Hub inputs and all outputs.
@@ -64,7 +75,7 @@ The reservation also stores the startup deadline. If the launcher is interrupted
 
 A training incident had a provider reservation and null runtime through the wall deadline. An operator terminated the pod, and the private output contained no artifacts. The in-container guard could arm only after the entrypoint began. The input fetch runs after that setup. The remaining provider evidence does not distinguish host provisioning, image pull, or a container that exited before startup could be observed.
 
-The pod arms its deadline guard before making Hub requests. It checks that the pinned source repositories are private, downloads only declared files, verifies byte sizes and SHA-256, and starts the pinned job under `/heocr` with inputs in `in/`. Write each expected snapshot to a temporary name and atomically rename it to the declared filename in `out/` once complete. Each declared snapshot is immutable after rename and has its own size limit. The supervisor commits snapshots as they become available, each alongside a checksum receipt under `runs/<run-id>/`. A v1 receipt records success after the trainer exits cleanly and every snapshot is committed. Trainer logs remain pod-local for v1 jobs.
+The pod arms its deadline guard before making Hub requests. It checks that each pinned source repository matches its declared visibility, downloads only declared files, verifies byte sizes and SHA-256, and starts the pinned job under `/heocr` with inputs in `in/`. Write each expected snapshot to a temporary name and atomically rename it to the declared filename in `out/` once complete. Each declared snapshot is immutable after rename and has its own size limit. The supervisor commits snapshots as they become available, each alongside a checksum receipt under `runs/<run-id>/`. A v1 receipt records success after the trainer exits cleanly and every snapshot is committed. Trainer logs remain pod-local for v1 jobs.
 
 The deadline uses the absolute launch cutoff. The container timeout stops the worker shortly before cutoff, leaving time for shutdown, and the guard independently attempts pod deletion at cutoff. The pod also attempts deletion after success or failure. A provisioning failure before the entrypoint starts or a Runpod deletion outage can require the account sweeper or console. Before approving a real-data launch, use a separately approved invented-input smoke run to verify managed-secret injection, snapshot publication and self-termination on the actual image and account.
 

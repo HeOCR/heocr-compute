@@ -263,7 +263,9 @@ def main(argv=None) -> int:
     train.add_argument("--job", required=True, help="approved private training job specification")
     train.add_argument("--approved-sha256", required=True, help="lead-approved SHA-256 of the exact job bytes")
     train.add_argument("--hf-secret", required=True, help="Runpod managed secret name")
-    train.add_argument("--hf-repo-scope", help="restrict all Hub reads and writes to this one private dataset")
+    train.add_argument("--hf-repo-scope", help="restrict private Hub reads and all writes to this one private dataset")
+    train.add_argument("--hf-public-train-repo", action="append", default=[],
+                       help="allow pinned public TRAIN archive reads from this dataset; repeat for multiple datasets")
     train.add_argument("--registry-auth-id", help="Runpod managed registry credential ID for a private image")
     train.add_argument("--hours", type=float, required=True)
     train.add_argument("--startup-minutes", type=float, default=budget.STARTUP_HOURS * 60,
