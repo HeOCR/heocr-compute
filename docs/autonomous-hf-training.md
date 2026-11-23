@@ -122,6 +122,15 @@ Set `schema` to `heocr_hf_training.v2` and include `telemetry` in the exact job 
 
 For each declared snapshot, atomically rename both `<stem>.training-metrics.json` and `<stem>.trainer.log` into `out/` after closing them. `<stem>` is the snapshot filename with its final extension removed. Close and publish the snapshot the same way. The supervisor waits for all three files and commits them atomically with the running receipt. The trainer can also close and write `out/setup.log` and, on failure, `out/partial.trainer.log`. The supervisor adds those logs when present and publishes its own closed `training.log` with the final receipt. All published artifacts must be nonempty. Avoid logging prompt or environment data that is outside the approved run scope. The supervisor gives v2 runs an earlier shutdown signal to leave room for bounded log publication before the absolute deadline.
 
+If the trainer logs on a different cadence from its checkpoints, a completed interval may have no progress lines. Before publishing its metrics and snapshot, close the interval log with the worker's helper:
+
+```sh
+/opt/heocr-venv/bin/python -m heocr_compute.remote.trainer_phase_log \
+    work/phase.log "out/$stem.trainer.log" "$previous_visit" "$completed_visit"
+```
+
+The helper preserves existing progress lines, appends the completed visit window and atomically moves the closed log. It creates a nonempty window record for a quiet interval. Use one writer and keep the phase log and destination on the same filesystem. This avoids tying a checkpoint's durability to whether an optimizer step happens to land on a progress-log boundary.
+
 The v2 receipt lists the checksum and size of every committed file. A successful receipt requires all checkpoint groups and the full `training.log`. A failed receipt may contain completed groups and partial failure logs. The supervisor starts `training.log` before input staging, using fixed phase messages so input failures still have private diagnostics. With startup receipts enabled, the same phase messages also appear in the container log. If a Hub commit cannot be confirmed, the supervisor preserves the latest visible receipt and emits a fixed error with the HTTP status when available. The collector checks group completeness, filenames, sizes and digests against the reservation.
 
 Tesseract trainers can apply `heocr_compute.remote.tesseract_telemetry.instrument` to `src/training/lstmtraining.cpp` at the pinned `SOURCE_REVISION`. This changes the CLI stopping counter to sample attempts and emits one `HEOCR_VISIT` record per main-loop attempt. `summarize` joins the exact attempt window to the ordered lane ledger. The training loss is native activation RMS, and BCER is native bag-of-characters error over recoder outputs. Both are fractions from the same training forward pass. Skipped attempts get no loss or BCER denominator. A missing or noncontiguous trace fails the window.

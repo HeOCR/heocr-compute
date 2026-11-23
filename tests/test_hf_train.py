@@ -4,7 +4,9 @@ import datetime as dt
 import io
 import json
 import os
+import shlex
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -618,10 +620,12 @@ class HfTrainTest(unittest.TestCase):
         hub.private_revision.assert_any_call({"repo": "HeOCR/example-input", "type": "dataset"}, "1" * 40)
         hub.download.assert_called_once_with(self.job["inputs"][0], "trainer.sh", "1" * 40, self.source.stat().st_size)
 
-    def run_telemetry_job(self, script):
+    def run_telemetry_job(self, script, *, use_r2=False):
         self.job["schema"] = hf_job.TELEMETRY_SCHEMA
         self.job["telemetry"] = {key: 500 for key in ("metrics_max_bytes", "trainer_log_max_bytes",
                                                     "run_log_max_bytes", "setup_log_max_bytes")}
+        if use_r2:
+            self.job["output"] = {"transport": "r2", "account": "a" * 32}
         self.source.write_text(script)
         self.job["inputs"][0].update(size=self.source.stat().st_size,
                                      sha256=hf_job.digest(self.source.read_bytes()))
@@ -641,7 +645,8 @@ class HfTrainTest(unittest.TestCase):
                    "pod_id": "pod-example", "job_sha256": self.args.approved_sha256,
                    "clean_sha256": job["clean_sha256"], "started_utc": "2099-01-01T00:00:00+00:00",
                    "finished_utc": None, "status": "running", "snapshots": []}
-        status = hf_train_pod.train(job, work, hub, receipt)
+        publisher = SimpleNamespace(commit=lambda receipt, files=(): commit(None, None, receipt, files)) if use_r2 else None
+        status = hf_train_pod.train(job, work, hub, receipt, r2_publisher=publisher)
         hf_train.validate_receipt(receipt, receipt["run_id"], receipt["pod_id"], {
             **job, "job_sha256": self.args.approved_sha256,
         })
@@ -665,6 +670,31 @@ class HfTrainTest(unittest.TestCase):
         for entry in final["snapshots"]:
             data = (commits[0][1] | logs)[entry["name"]]
             self.assertEqual((entry["size"], entry["sha256"]), (len(data), hf_job.digest(data)))
+
+    def test_r2_trainer_checkpoint_without_interval_progress_log_still_commits(self):
+        self.job["snapshots"] = [{"name": name, "max_bytes": 500} for name in ("first.pt", "second.pt")]
+        repo = Path(__file__).resolve().parents[1]
+        rotate = f"PYTHONPATH={shlex.quote(str(repo))} {shlex.quote(sys.executable)} -B -m heocr_compute.remote.trainer_phase_log"
+        status, commits = self.run_telemetry_job(
+            "set -eu\n"
+            "mkdir work\n"
+            "printf 'TRAIN attempts 80000\\n' > work/phase.log\n"
+            f"{rotate} work/phase.log out/first.trainer.log 0 85000\n"
+            "printf '{}' > out/first.training-metrics.json\n"
+            "printf first > out/first.pt\n"
+            "test ! -e work/phase.log\n"
+            f"{rotate} work/phase.log out/second.trainer.log 85000 170000\n"
+            "printf '{}' > out/second.training-metrics.json\n"
+            "printf second > out/second.pt\n",
+            use_r2=True,
+        )
+        self.assertEqual(status, "ok")
+        self.assertEqual([receipt["status"] for receipt, _ in commits], ["running", "running", "ok"])
+        self.assertEqual(commits[0][1]["first.trainer.log"],
+                         b"TRAIN attempts 80000\nCheckpoint visit window (0, 85000]\n")
+        self.assertEqual(commits[1][1]["second.trainer.log"], b"Checkpoint visit window (85000, 170000]\n")
+        self.assertEqual(set(commits[1][1]), {"second.pt", "second.training-metrics.json", "second.trainer.log"})
+        self.assertEqual(set(commits[-1][1]), {"training.log"})
 
     def test_startup_receipt_precedes_inputs_and_failure_keeps_redacted_phase(self):
         self.require_worker_receipt()
