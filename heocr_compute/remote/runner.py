@@ -282,13 +282,15 @@ def sweep(api, ledger: Ledger, *, everything: bool = False, dry_run: bool = Fals
             state = observe_startup(api, pod["id"])
             if state == "running" and res.get("worker_receipt_required"):
                 from .api import load_hf_token
+                from .hf_job import is_r2_output
                 from .hf_train import read_worker_startup
 
                 try:
-                    if read_worker_startup(load_hf_token(), rid, pod["id"], res) is None:
+                    token = None if is_r2_output(res) else load_hf_token()
+                    if read_worker_startup(token, rid, pod["id"], res) is None:
                         state = "missing_receipt"
                 except (ImportError, OSError, RunPodError, ValueError):
-                    out(f"sweep: worker receipt unavailable for pod {pod['id']}; verify private Hub access")
+                    out(f"sweep: worker receipt unavailable for pod {pod['id']}; verify private output access")
                     continue
             if state == "running" and not dry_run:
                 record_startup(ledger, rid, pod["id"], state=state)

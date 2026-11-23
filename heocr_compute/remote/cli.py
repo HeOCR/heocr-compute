@@ -255,7 +255,7 @@ def main(argv=None) -> int:
     line.add_argument("--font-manifest-sha256", default=render.FONT_SHA)
     line.add_argument("--dataset", required=True, help="existing private HeOCR HF dataset")
 
-    train = sub.add_parser("hf-train", help="launch autonomous training from approved private HF pins")
+    train = sub.add_parser("hf-train", help="launch autonomous training from approved pins")
     train.set_defaults(fn=cmd_hf_train)
     train.add_argument("--profile", choices=["cpu", "gpu", "smoke"], required=True)
     train.add_argument("--cpu-flavor")
@@ -263,7 +263,7 @@ def main(argv=None) -> int:
     train.add_argument("--job", required=True, help="approved private training job specification")
     train.add_argument("--approved-sha256", required=True, help="lead-approved SHA-256 of the exact job bytes")
     train.add_argument("--hf-secret", required=True, help="Runpod managed secret name")
-    train.add_argument("--hf-repo-scope", help="restrict private Hub reads and all writes to this one private dataset")
+    train.add_argument("--hf-repo-scope", help="restrict private Hub operations to this one private dataset")
     train.add_argument("--hf-public-train-repo", action="append", default=[],
                        help="allow pinned public TRAIN archive reads from this dataset; repeat for multiple datasets")
     train.add_argument("--registry-auth-id", help="Runpod managed registry credential ID for a private image")
@@ -271,7 +271,7 @@ def main(argv=None) -> int:
     train.add_argument("--startup-minutes", type=float, default=budget.STARTUP_HOURS * 60,
                        help="minutes to wait for container runtime, up to the quoted 15-minute allowance")
     train.add_argument("--require-worker-receipt", action="store_true",
-                       help="require a matching private Hub startup receipt from the pinned worker image")
+                       help="require a matching private startup receipt from the pinned worker image")
     train.add_argument("--run-cap", type=float, required=True)
     train.add_argument("--month-cap", type=float, default=budget.MONTH_CAP_USD)
     train.add_argument("--dry-run", action="store_true")

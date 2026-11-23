@@ -109,8 +109,13 @@ def parse(raw, approved):
         fields(job["telemetry"], "metrics_max_bytes trainer_log_max_bytes run_log_max_bytes setup_log_max_bytes")
         require(all(size_ok(limit) for limit in job["telemetry"].values()), "invalid telemetry size limit")
     require(matches(IMAGE, job["image"]), "expected a digest-pinned worker image")
-    fields(job["output"], "repo type")
-    location(job["output"])
+    if is_r2_output(job):
+        fields(job["output"], "transport account")
+        require(telemetry_enabled and matches(R2_ACCOUNT, job["output"]["account"]),
+                "R2 output requires a telemetry job and exact account")
+    else:
+        fields(job["output"], "repo type")
+        location(job["output"])
     require(isinstance(job["inputs"], list) and job["inputs"], "job has no pinned inputs")
     targets = set()
     hub_targets = set()
@@ -158,6 +163,11 @@ def parse(raw, approved):
         for name in names:
             safe_path(name)
     return job
+
+
+def is_r2_output(job):
+    output = job.get("output")
+    return isinstance(output, dict) and output.get("transport") == "r2"
 
 
 def check_repo_scope(job, repo, public_repos=()):

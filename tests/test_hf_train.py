@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from urllib.parse import urlencode
 from unittest.mock import MagicMock, Mock, patch
 
-from heocr_compute.remote import cli, hf_job, hf_train, hf_train_pod, profiles, r2_input
+from heocr_compute.remote import cli, hf_job, hf_train, hf_train_pod, profiles, r2_input, r2_output
 from heocr_compute.remote.api import RunPodError
 from heocr_compute.remote.ledger import Ledger
 from heocr_compute.remote.policy import Policy, Refused
@@ -113,6 +113,68 @@ class HfTrainTest(unittest.TestCase):
         self.assertEqual(json.loads(body["env"][r2_input.ENV]), {pin["target"]: url})
         for surface in (stdout.getvalue(), self.ledger.path.read_text(), self.jobfile.read_text()):
             self.assertNotIn("X-Amz-Signature", surface)
+
+    def set_r2_output(self):
+        self.job["output"] = {"transport": "r2", "account": "1" * 32}
+        self.job["schema"] = hf_job.TELEMETRY_SCHEMA
+        self.job["telemetry"] = dict.fromkeys(
+            ("metrics_max_bytes", "trainer_log_max_bytes", "run_log_max_bytes", "setup_log_max_bytes"), 500)
+        self.args.hf_repo_scope = self.job["inputs"][0]["repo"]
+        self.args.require_worker_receipt = True
+        self.write_job()
+
+    def test_r2_output_launch_passes_puts_only_in_pod_env_and_uses_r2_startup(self):
+        self.set_r2_output()
+        envelope = "invented-put-secret"
+        with (patch.object(Policy, "load", return_value=Policy()),
+              patch.object(r2_output, "LocalR2") as local,
+              patch.object(hf_train, "read_worker_startup", return_value="running") as startup,
+              patch.object(hf_train, "load_hf_token", side_effect=AssertionError("using Hub output")),
+              contextlib.redirect_stdout(io.StringIO()) as stdout):
+            local.return_value.put_urls.return_value = envelope
+            self.args.dry_run = True
+            self.assertEqual(hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger), 0)
+            self.api.create_pod.assert_not_called()
+            self.args.dry_run = False
+            self.assertEqual(hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger), 0)
+        body, = self.api.create_pod.call_args.args
+        self.assertEqual(body["env"][r2_output.ENV], envelope)
+        self.assertEqual(startup.call_args.kwargs["r2"], local.return_value)
+        self.assertEqual(local.return_value.put_urls.call_count, 2)
+        for surface in (stdout.getvalue(), self.ledger.path.read_text(), self.jobfile.read_text()):
+            self.assertNotIn(envelope, surface)
+
+    def test_r2_worker_keeps_logs_after_checkpoint_put_failure(self):
+        self.set_r2_output()
+        self.source.write_text(
+            'echo useful-trainer-output\n'
+            'echo checkpoint > out/model.traineddata\n'
+            'echo metrics > out/model.training-metrics.json\n'
+            'echo lane-log > out/model.trainer.log\n'
+        )
+        self.job["inputs"][0].update(sha256=hf_job.digest(self.source.read_bytes()), size=self.source.stat().st_size)
+        hub = Mock()
+        hub.download.return_value = self.source
+        publisher = Mock()
+        commits = []
+
+        def commit(receipt, artifacts=()):
+            names = [path.name for path in artifacts]
+            if "model.traineddata" in names:
+                raise hf_job.PublishError("private R2 output PUT could not be confirmed")
+            commits.append((receipt["status"], names, [path.read_bytes() for path in artifacts]))
+
+        publisher.commit.side_effect = commit
+        receipt = {"run_id": "20261123-001122-a123", "status": "running", "snapshots": []}
+        work = self.root / "pod"
+        work.mkdir()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(hf_train_pod.train(self.job, work, hub, receipt,
+                                              publish_startup=True, r2_publisher=publisher), "failed")
+        hub.commit.assert_not_called()
+        self.assertEqual(commits[0], ("running", [], []))
+        self.assertEqual(commits[1][:2], ("failed", ["training.log"]))
+        self.assertIn(b"useful-trainer-output", commits[1][2][0])
 
     def add_public_archive(self):
         self.job["schema"] = hf_job.TELEMETRY_SCHEMA
