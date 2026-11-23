@@ -10,9 +10,10 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from urllib.parse import urlencode
+from unittest.mock import MagicMock, Mock, patch
 
-from heocr_compute.remote import cli, hf_job, hf_train, hf_train_pod, profiles
+from heocr_compute.remote import cli, hf_job, hf_train, hf_train_pod, profiles, r2_input
 from heocr_compute.remote.api import RunPodError
 from heocr_compute.remote.ledger import Ledger
 from heocr_compute.remote.policy import Policy, Refused
@@ -77,6 +78,74 @@ class HfTrainTest(unittest.TestCase):
         self.assertEqual([e["event"] for e in self.ledger.events()], ["reserve", "pod", "startup"])
         self.api.pod_startup_state.assert_called_once_with("pod-example")
         self.api.terminate.assert_not_called()
+
+    def r2_fixture(self):
+        self.args.hf_repo_scope = "HeOCR/example-input"
+        self.job["output"] = {"repo": self.args.hf_repo_scope, "type": "dataset"}
+        self.job["schema"] = hf_job.TELEMETRY_SCHEMA
+        self.job["telemetry"] = dict.fromkeys(
+            ("metrics_max_bytes", "trainer_log_max_bytes", "run_log_max_bytes", "setup_log_max_bytes"), 100
+        )
+        pin = {"transport": "r2", "account": "1" * 32, "path": "train/exact.tar", "target": "exact.tar",
+               "size": 3, "sha256": hf_job.digest(b"abc")}
+        self.job["inputs"].append(pin)
+        self.write_job()
+        now = dt.datetime.now(dt.timezone.utc)
+        qs = urlencode({
+            "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+            "X-Amz-Credential": "fixture/" + now.strftime("%Y%m%d") + "/auto/s3/aws4_request",
+            "X-Amz-Date": now.strftime("%Y%m%dT%H%M%SZ"),
+            "X-Amz-Expires": "3600", "X-Amz-SignedHeaders": "host", "X-Amz-Signature": "2" * 64,
+        })
+        return pin, f"https://{pin['account']}.r2.cloudflarestorage.com/{r2_input.BUCKET}/{pin['path']}?{qs}"
+
+    def test_r2_secrets_only_reach_pod_env_and_dry_run_creates_nothing(self):
+        pin, url = self.r2_fixture()
+        secret = json.dumps({pin["target"]: url})
+        with patch.dict(os.environ, {r2_input.ENV: secret}), patch.object(
+                Policy, "load", return_value=Policy()), contextlib.redirect_stdout(io.StringIO()) as stdout:
+            self.args.dry_run = True
+            self.assertEqual(hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger), 0)
+            self.api.create_pod.assert_not_called()
+            self.args.dry_run = False
+            self.assertEqual(hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger), 0)
+        body, = self.api.create_pod.call_args.args
+        self.assertEqual(json.loads(body["env"][r2_input.ENV]), {pin["target"]: url})
+        for surface in (stdout.getvalue(), self.ledger.path.read_text(), self.jobfile.read_text()):
+            self.assertNotIn("X-Amz-Signature", surface)
+
+    def test_r2_wrong_object_expiry_and_job_secret_are_rejected(self):
+        pin, url = self.r2_fixture()
+        for changed in (url.replace("exact.tar", "other.tar"), url.replace("Expires=3600", "Expires=86401"),
+                        url.replace(".r2.cloudflarestorage.com", ".example.com")):
+            with self.assertRaisesRegex(ValueError, "mismatched presigned R2 GET") as exc:
+                r2_input.read_urls(self.job, json.dumps({pin["target"]: changed}))
+            self.assertNotIn("X-Amz-Signature", str(exc.exception))
+        self.job["args"] = [url]
+        self.write_job()
+        with self.assertRaisesRegex(ValueError, "must not contain any presigned URLs"):
+            hf_job.parse(self.jobfile.read_bytes(), self.args.approved_sha256)
+
+    def test_r2_worker_verifies_bytes_and_consumes_secret(self):
+        pin, url = self.r2_fixture()
+        hub = Mock()
+        hub.download.return_value = self.source
+        opener = MagicMock()
+        response = opener.open.return_value.__enter__.return_value
+        response.status = 200
+        response.headers = {"Content-Length": "3"}
+        response.read.side_effect = [b"abc", b""]
+        with patch.dict(os.environ, {r2_input.ENV: json.dumps({pin["target"]: url})}), patch.object(
+                r2_input.urllib.request, "build_opener", return_value=opener):
+            hf_train_pod.fetch_inputs(self.job, self.root, hub)
+            self.assertNotIn(r2_input.ENV, os.environ)
+        self.assertEqual((self.root / pin["target"]).read_bytes(), b"abc")
+        hub.download.assert_called_once()
+        response.read.side_effect = [b"def", b""]
+        with patch.object(r2_input.urllib.request, "build_opener", return_value=opener), self.assertRaisesRegex(
+                ValueError, "could not download and verify"):
+            r2_input.download(pin, url, self.root / "changed.tar")
+        self.assertFalse((self.root / "changed.tar").exists())
 
     def launch_with_clock(self, state):
         clock = dt.datetime(2099, 1, 1, tzinfo=dt.timezone.utc)

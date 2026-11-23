@@ -9,7 +9,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import hf_job
+from . import hf_job, r2_input
 from .manifest import sha256_file
 
 
@@ -20,15 +20,20 @@ def token(name):
 
 
 def fetch_inputs(job, root, hub):
-    revisions = {(item["repo"], item["type"], item["revision"]) for item in job["inputs"]}
+    urls = r2_input.read_urls(job, os.environ.pop(r2_input.ENV, None))
+    hub_pins = [item for item in job["inputs"] if item.get("transport") != "r2"]
+    revisions = {(item["repo"], item["type"], item["revision"]) for item in hub_pins}
     for repo, kind, revision in sorted(revisions):
         hub.private_revision({"repo": repo, "type": kind}, revision)
     for item in job["inputs"]:
-        source = hub.download(item, item["path"], item["revision"], item["size"])
-        hf_job.verify_file(source, item["size"], item["sha256"])
         path = root / item["target"]
         path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, path)
+        if item.get("transport") == "r2":
+            r2_input.download(item, urls[item["target"]], path)
+        else:
+            source = hub.download(item, item["path"], item["revision"], item["size"])
+            hf_job.verify_file(source, item["size"], item["sha256"])
+            shutil.copyfile(source, path)
 
 
 def freeze_output(path, staging, limit):
@@ -146,7 +151,8 @@ def main():
         spec_sha = os.environ["HEOCR_HF_JOB_SHA256"]
         job = hf_job.parse(raw, spec_sha)
         repo_scope = os.environ.get("HEOCR_HF_REPO_SCOPE")
-        if repo_scope is not None or os.environ.get("HEOCR_HF_REQUIRE_REPO_SCOPE") == "1":
+        if (repo_scope is not None or os.environ.get("HEOCR_HF_REQUIRE_REPO_SCOPE") == "1"
+                or any(item.get("transport") == "r2" for item in job["inputs"])):
             hf_job.check_repo_scope(job, repo_scope)
         root = Path("/heocr")
         root.mkdir(mode=0o700, exist_ok=True)
