@@ -14,7 +14,7 @@ ENV = "HEOCR_R2_URLS"
 MAX_LIFETIME = 24 * 60 * 60
 
 
-def check_url(pin, url, *, now, min_remaining, signed_headers="host", method="GET"):
+def check_url(pin, url, *, now, min_remaining, signed_headers="host", method="GET", bucket=BUCKET):
     """Match the endpoint, object and lifetime independently of the signed URL."""
     try:
         if not isinstance(url, str) or not url.isascii() or len(url) > 4096 or not url.isprintable():
@@ -29,7 +29,7 @@ def check_url(pin, url, *, now, min_remaining, signed_headers="host", method="GE
         host = f"{pin['account']}.r2.cloudflarestorage.com"
         valid = (
             parsed.scheme == "https" and parsed.netloc == host and not parsed.fragment
-            and parsed.path == f"/{BUCKET}/{quote(pin['path'], safe='/')}"
+            and parsed.path == f"/{bucket}/{quote(pin['path'], safe='/')}"
             and len(query) == len(pairs) and query["X-Amz-Algorithm"] == "AWS4-HMAC-SHA256"
             and query["X-Amz-SignedHeaders"] == signed_headers and len(signature) == 64
             and query.get("x-id", {"GET": "GetObject", "PUT": "PutObject"}[method])

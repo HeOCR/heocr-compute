@@ -1,0 +1,52 @@
+name: Publish Paddle CUDA comparator
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.repository == 'HeOCR/heocr-compute' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/heocr/heocr-compute-comparator-paddle-cuda
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build and check AMD64 image without test inputs
+        run: |
+          context="$RUNNER_TEMP/paddle-cuda-context"
+          mkdir "$context"
+          git archive "$GITHUB_SHA" comparators docker/comparators heocr_compute | tar -xf - -C "$context"
+          docker buildx build --platform linux/amd64 --load --provenance=false --sbom=false \
+            --tag paddle-cuda:build --file "$context/docker/comparators/paddle-cuda.Dockerfile" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" "$context"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' paddle-cuda:build)" = linux/amd64
+          docker run --rm --network none paddle-cuda:build --help >/dev/null
+          docker run --rm --network none --entrypoint /opt/heocr-venv/bin/python paddle-cuda:build \
+            -B -m heocr_compute.remote.paddle_eval --help >/dev/null
+          if output="$(docker run --rm --network none -e HEOCR_PADDLE_JOB='{}' \
+            -e HEOCR_HF_DEADLINE=invalid paddle-cuda:build 2>&1)"; then
+            echo 'Invalid Paddle deadline unexpectedly accepted' >&2
+            exit 1
+          fi
+          grep -Fx 'Missing valid Paddle pod deadline' <<< "$output"
+      - name: Publish and report immutable image
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          tag="$IMAGE:sha-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker tag paddle-cuda:build "$tag"
+          docker push "$tag"
+          digest="$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'Paddle CUDA image `%s@%s` from `%s`\n' "$IMAGE" "$digest" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
