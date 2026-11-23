@@ -23,10 +23,16 @@ def fetch_inputs(job, root, hub, progress=lambda _: None):
     progress("Validating presigned input URLs.")
     urls = r2_input.read_urls(job, os.environ.pop(r2_input.ENV, None))
     hub_pins = [item for item in job["inputs"] if item.get("transport") != "r2"]
-    revisions = {(item["repo"], item["type"], item["revision"]) for item in hub_pins}
-    for repo, kind, revision in sorted(revisions):
-        progress("Verifying a private Hub input revision.")
-        hub.private_revision({"repo": repo, "type": kind}, revision)
+    revisions = {(item["repo"], item["type"], item["revision"], item.get("transport") == hf_job.PUBLIC_TRAIN)
+                 for item in hub_pins}
+    for repo, kind, revision, public in sorted(revisions):
+        source = {"repo": repo, "type": kind}
+        if public:
+            progress("Verifying a public Hub TRAIN input revision.")
+            hub.public_train_revision(source, revision)
+        else:
+            progress("Verifying a private Hub input revision.")
+            hub.private_revision(source, revision)
     for item in job["inputs"]:
         path = root / item["target"]
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -34,7 +40,10 @@ def fetch_inputs(job, root, hub, progress=lambda _: None):
             progress("Downloading a pinned R2 input.")
             r2_input.download(item, urls[item["target"]], path)
         else:
-            progress("Downloading a pinned private Hub input.")
+            if item.get("transport") == hf_job.PUBLIC_TRAIN:
+                progress("Downloading a pinned public Hub TRAIN input.")
+            else:
+                progress("Downloading a pinned private Hub input.")
             source = hub.download(item, item["path"], item["revision"], item["size"])
             hf_job.verify_file(source, item["size"], item["sha256"])
             shutil.copyfile(source, path)
@@ -168,9 +177,10 @@ def main():
         spec_sha = os.environ["HEOCR_HF_JOB_SHA256"]
         job = hf_job.parse(raw, spec_sha)
         repo_scope = os.environ.get("HEOCR_HF_REPO_SCOPE")
+        public_repos = os.environ.get("HEOCR_HF_PUBLIC_TRAIN_REPOS", "").split()
         if (repo_scope is not None or os.environ.get("HEOCR_HF_REQUIRE_REPO_SCOPE") == "1"
-                or any(item.get("transport") == "r2" for item in job["inputs"])):
-            hf_job.check_repo_scope(job, repo_scope)
+                or public_repos or any("transport" in item for item in job["inputs"])):
+            hf_job.check_repo_scope(job, repo_scope, public_repos)
         root = Path("/heocr")
         root.mkdir(mode=0o700, exist_ok=True)
         run_id = os.environ["HEOCR_HF_RUN_ID"]

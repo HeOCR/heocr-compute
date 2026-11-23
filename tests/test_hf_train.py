@@ -114,6 +114,73 @@ class HfTrainTest(unittest.TestCase):
         for surface in (stdout.getvalue(), self.ledger.path.read_text(), self.jobfile.read_text()):
             self.assertNotIn("X-Amz-Signature", surface)
 
+    def add_public_archive(self):
+        self.job["schema"] = hf_job.TELEMETRY_SCHEMA
+        self.job["telemetry"] = {name: 100 for name in (
+            "metrics_max_bytes", "trainer_log_max_bytes", "run_log_max_bytes", "setup_log_max_bytes")}
+        self.args.hf_repo_scope = "HeOCR/example-input"
+        self.job["output"] = {"repo": self.args.hf_repo_scope, "type": "dataset"}
+        pin = {**self.job["inputs"][0], "repo": "HeOCR/example-public", "path": "open/train.tar",
+               "target": "train.tar", "transport": hf_job.PUBLIC_TRAIN, "release_sha256": "a" * 64}
+        self.job["inputs"].append(pin)
+        self.write_job()
+        return pin
+
+    def test_public_train_needs_exact_allowlist_and_keeps_private_output(self):
+        pin = self.add_public_archive()
+        profile = profiles.PROFILES["smoke"]
+        with self.assertRaisesRegex(ValueError, "public TRAIN dataset scope"):
+            hf_train.launch(self.args, profile, self.api, self.ledger)
+        self.api.create_pod.assert_not_called()
+        self.args.hf_public_train_repo = [pin["repo"]]
+        with patch.object(Policy, "load", return_value=Policy()), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(hf_train.launch(self.args, profile, self.api, self.ledger), 0)
+        body, = self.api.create_pod.call_args.args
+        self.assertEqual(body["env"]["HEOCR_HF_PUBLIC_TRAIN_REPOS"], pin["repo"])
+        self.job["output"]["repo"] = pin["repo"]
+        self.write_job()
+        with self.assertRaisesRegex(ValueError, "approved Hub dataset scope"):
+            hf_train.launch(self.args, profile, self.api, self.ledger)
+
+    def test_public_train_can_only_be_a_release_bound_archive(self):
+        pin = self.add_public_archive()
+        for changes, message in [
+            ({"path": "train.sh"}, "TRAIN archives"),
+            ({"release_sha256": "unknown"}, "release receipt"),
+            ({"type": "model"}, "release receipt"),
+        ]:
+            original = pin.copy()
+            pin.update(changes)
+            self.write_job()
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, message):
+                hf_job.parse(self.jobfile.read_bytes(), self.args.approved_sha256)
+            pin.update(original)
+
+    def test_public_train_uses_anonymous_reads_and_rejects_gated_revision(self):
+        pin = self.add_public_archive()
+        hub = object.__new__(hf_job.Hub)
+        hub.api = Mock()
+        hub.token = "invented-private-token"
+        hub.cache = self.root
+        hub.get = Mock(return_value=self.source)
+        hub.api.repo_info.return_value = SimpleNamespace(
+            private=False, gated="manual", id=pin["repo"], sha=pin["revision"])
+        with self.assertRaisesRegex(ValueError, "gated"):
+            hub.public_train_revision(pin, pin["revision"])
+        hub.api.repo_info.side_effect = [
+            SimpleNamespace(private=True, id=self.args.hf_repo_scope, sha=pin["revision"]),
+            SimpleNamespace(private=False, gated=False, id=pin["repo"], sha=pin["revision"]),
+        ]
+        hub.api.get_paths_info.side_effect = [
+            [SimpleNamespace(path=item["path"], size=item["size"])] for item in self.job["inputs"]]
+        out = self.root / "download"
+        hf_train_pod.fetch_inputs(self.job, out, hub)
+        self.assertEqual((out / pin["target"]).read_bytes(), self.source.read_bytes())
+        self.assertIs(hub.api.repo_info.call_args.kwargs["token"], False)
+        self.assertIs(hub.api.get_paths_info.call_args.kwargs["token"], False)
+        self.assertIs(hub.get.call_args.kwargs["token"], False)
+        self.assertEqual(hub.get.call_args_list[0].kwargs["token"], hub.token)
+
     def test_r2_wrong_object_expiry_and_job_secret_are_rejected(self):
         pin, url = self.r2_fixture()
         for changed in (url.replace("exact.tar", "other.tar"), url.replace("Expires=3600", "Expires=86401"),

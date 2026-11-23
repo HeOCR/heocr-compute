@@ -1,4 +1,4 @@
-"""The autonomous training job contract and canonical private Hub access."""
+"""The autonomous training job contract and canonical Hub access."""
 from __future__ import annotations
 
 import hashlib
@@ -12,6 +12,7 @@ SCHEMA = "heocr_hf_training.v1"
 RECEIPT = "heocr_hf_training_receipt.v1"
 TELEMETRY_SCHEMA = "heocr_hf_training.v2"
 TELEMETRY_RECEIPT = "heocr_hf_training_receipt.v2"
+PUBLIC_TRAIN = "hf-public"
 MAX_SPEC = 24 * 1024
 HUB = "https://huggingface.co"
 SHA = re.compile(r"[0-9a-f]{64}")
@@ -115,19 +116,24 @@ def parse(raw, approved):
     hub_targets = set()
     for item in job["inputs"]:
         is_r2 = isinstance(item, dict) and item.get("transport") == "r2"
+        is_public = isinstance(item, dict) and item.get("transport") == PUBLIC_TRAIN
         if is_r2:
             fields(item, "transport account path target size sha256")
             require(telemetry_enabled and matches(R2_ACCOUNT, item["account"]),
                     "R2 archives require a v2 job and an exact account")
         else:
-            fields(item, "repo type revision path target size sha256")
+            fields(item, "repo type revision path target size sha256"
+                   + (" transport release_sha256" if is_public else ""))
             location(item)
             require(matches(REVISION, item["revision"]), "Hub input requires a full revision")
+        if is_public:
+            require(telemetry_enabled and item["type"] == "dataset" and matches(SHA, item["release_sha256"]),
+                    "public TRAIN archives require a v2 job and exact release receipt")
         safe_path(item["path"])
         target = safe_path(item["target"])
         require(matches(SHA, item["sha256"]) and size_ok(item["size"]), "input requires byte size and SHA-256")
-        if is_r2:
-            require(item["path"].endswith(".tar") and target.endswith(".tar"), "R2 inputs must be TRAIN archives")
+        if is_r2 or is_public:
+            require(item["path"].endswith(".tar") and target.endswith(".tar"), "external inputs must be TRAIN archives")
         else:
             hub_targets.add(target)
         require(target not in targets and all(not target.startswith(t + "/") and not t.startswith(target + "/")
@@ -154,12 +160,16 @@ def parse(raw, approved):
     return job
 
 
-def check_repo_scope(job, repo):
-    """Require every Hub operation in a job to use one operator-approved dataset."""
+def check_repo_scope(job, repo, public_repos=()):
+    """Restrict private Hub operations and separately allow named public TRAIN inputs."""
     require(matches(REPO, repo), "training worker requires one approved HeOCR dataset")
-    pins = (record for record in (*job["inputs"], job["output"]) if record.get("transport") != "r2")
-    require(all(record["repo"] == repo and record["type"] == "dataset" for record in pins),
+    require(all(matches(REPO, name) for name in public_repos) and repo not in public_repos,
+            "public TRAIN input repositories must be distinct HeOCR datasets")
+    private = (record for record in (*job["inputs"], job["output"]) if "transport" not in record)
+    require(all(record["repo"] == repo and record["type"] == "dataset" for record in private),
             "job is outside its approved Hub dataset scope")
+    public_used = {record["repo"] for record in job["inputs"] if record.get("transport") == PUBLIC_TRAIN}
+    require(public_used == set(public_repos), "job differs from its approved public TRAIN dataset scope")
 
 
 def verify_file(path, size, sha256):
@@ -186,13 +196,23 @@ class Hub:
                 and (revision is None or info.sha == revision), "Hub repository is not private or revision mismatched")
         return info.sha
 
-    def download(self, source, name, revision, max_size):
+    def public_train_revision(self, source, revision):
         try:
-            entries = self.api.get_paths_info(source["repo"], [name], repo_type=source["type"], revision=revision)
+            info = self.api.repo_info(source["repo"], repo_type="dataset", revision=revision, timeout=30, token=False)
+        except Exception:
+            raise ValueError("could not verify the named public TRAIN dataset") from None
+        require(info.private is False and info.gated is False and info.id == source["repo"] and info.sha == revision,
+                "public TRAIN dataset is gated, private, or has a mismatched revision")
+
+    def download(self, source, name, revision, max_size):
+        token = False if source.get("transport") == PUBLIC_TRAIN else self.token
+        try:
+            entries = self.api.get_paths_info(source["repo"], [name], repo_type=source["type"], revision=revision,
+                                              token=token)
             expected = [e.size for e in entries if e.path == name and hasattr(e, "size")]
             require(len(expected) == 1 and 0 < expected[0] <= max_size, "missing or oversized Hub file")
             return Path(self.get(source["repo"], name, repo_type=source["type"], revision=revision,
-                                 token=self.token, endpoint=HUB, cache_dir=self.cache))
+                                 token=token, endpoint=HUB, cache_dir=self.cache))
         except Exception:
             raise ValueError("could not download a bounded file from the pinned Hub revision") from None
 

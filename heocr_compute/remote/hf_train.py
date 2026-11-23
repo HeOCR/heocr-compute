@@ -97,13 +97,15 @@ def launch(a, profile, api, ledger):
         raise ValueError("could not read the approved training job file") from None
     job = hf_job.parse(raw, a.approved_sha256)
     repo_scope = getattr(a, "hf_repo_scope", None)
+    public_repos = getattr(a, "hf_public_train_repo", ())
     if any(item.get("transport") == "r2" for item in job["inputs"]):
         hf_job.require(repo_scope is not None, "presigned R2 inputs require --hf-repo-scope")
     if job["image"].startswith(KRAKEN_TRAIN_IMAGE):
         hf_job.require(repo_scope is not None, "Kraken training image requires --hf-repo-scope")
         hf_job.require(profile.kind == "cpu", "Kraken training image requires a CPU profile")
-    if repo_scope is not None:
-        hf_job.check_repo_scope(job, repo_scope)
+    if repo_scope is not None or public_repos or any(item.get("transport") == hf_job.PUBLIC_TRAIN
+                                                     for item in job["inputs"]):
+        hf_job.check_repo_scope(job, repo_scope, public_repos)
     hf_job.require(profile.cloud == "SECURE", "training requires a Secure Cloud profile")
     hf_job.require(hf_job.matches(hf_job.SECRET, a.hf_secret), "supply the name of a Runpod secret")
     registry = getattr(a, "registry_auth_id", None)
@@ -176,6 +178,8 @@ def launch(a, profile, api, ledger):
     }
     if repo_scope is not None:
         env["HEOCR_HF_REPO_SCOPE"] = repo_scope
+    if public_repos:
+        env["HEOCR_HF_PUBLIC_TRAIN_REPOS"] = " ".join(sorted(set(public_repos)))
     if urls:
         env[r2_input.ENV] = json.dumps(urls, separators=(",", ":"))
     if "telemetry" in job:
