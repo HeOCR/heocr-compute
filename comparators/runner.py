@@ -49,7 +49,7 @@ def fetch(root, model):
                 os.unlink(temp)
 
 
-def prepare(root, model, mode):
+def prepare(root, model, mode, *, paddle_provider="CPUExecutionProvider"):
     if model == "trocr-s44" and mode != "line":
         raise ValueError("trocr-s44 requires a pre-cropped line image")
     assets = {asset["path"]: asset["sha256"] for asset in selected(model)}
@@ -81,11 +81,25 @@ def prepare(root, model, mode):
             "dilate_w": 0, "dilate_h": 0, "conf_threshold": 0.50,
             "split_long": 80, "gershayim": True, "geresh_yod": True,
         }
-        engine = HebrewOCR.word(str(root / "paddle"), providers=["CPUExecutionProvider"], **options)
+        if paddle_provider not in ("CPUExecutionProvider", "CUDAExecutionProvider"):
+            raise ValueError("unsupported Paddle execution provider")
+        gpu = paddle_provider == "CUDAExecutionProvider"
+        if gpu:
+            import onnxruntime as ort
+
+            if paddle_provider not in ort.get_available_providers():
+                raise RuntimeError("Paddle CUDA execution provider is unavailable")
+        engine = HebrewOCR.word(str(root / "paddle"), providers=[paddle_provider], **options)
+        if gpu:
+            for session in (engine.det_sess, engine.rec.ctc, engine.rec.enc, engine.rec.dec):
+                if session.get_providers()[:1] != [paddle_provider]:
+                    raise RuntimeError("Paddle graph did not start with the CUDA execution provider")
+                session.disable_fallback()
         provenance["tool"] = {"name": "paddleocr-hebrew", "version": dist.version,
-                              "revision": PADDLE_REVISION, "onnxruntime_version": metadata.version("onnxruntime")}
+                              "revision": PADDLE_REVISION,
+                              "onnxruntime_version": metadata.version("onnxruntime-gpu" if gpu else "onnxruntime")}
         provenance["settings"] = {
-            "pipeline": "word", "rec_mode": "cascade", "provider": "CPUExecutionProvider",
+            "pipeline": "word", "rec_mode": "cascade", "provider": paddle_provider,
             "detector": "word-det/det.onnx", "order": "upstream RTL rows", "options": options,
         }
 
