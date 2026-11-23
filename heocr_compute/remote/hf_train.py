@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import budget, hf_job, r2_input
+from . import budget, hf_job, r2_input, r2_output
 from .api import RunPodError, load_hf_token
 from .policy import Policy, Refused
 from .runner import (DEFAULT_CAPACITY_WAIT_HOURS, HF_PROFILE_MARKER, Runner, new_run_id, observe_startup, pod_name,
@@ -32,7 +32,15 @@ def check_hub_inputs(job):
             policy.check_hash(path, item["sha256"])
 
 
-def read_worker_startup(token, run_id, pod_id, reserve):
+def read_worker_startup(token, run_id, pod_id, reserve, *, r2=None):
+    if hf_job.is_r2_output(reserve):
+        r2 = r2 if r2 is not None else r2_output.LocalR2(reserve["output"]["account"])
+        with tempfile.TemporaryDirectory(prefix="heocr-r2-startup-") as cache:
+            receipt, _ = read_r2_receipt(r2, run_id, reserve, Path(cache), startup_only=True)
+        if receipt is None:
+            return None
+        validate_receipt(receipt, run_id, pod_id, reserve)
+        return receipt["status"]
     output = reserve["output"]
     with tempfile.TemporaryDirectory(prefix="heocr-worker-receipt-") as cache:
         hub = hf_job.Hub(token, Path(cache))
@@ -45,29 +53,34 @@ def read_worker_startup(token, run_id, pod_id, reserve):
         return receipt["status"]
 
 
-def watch_startup(runner, run_id, pod_id, deadline, token=None):
+def watch_startup(runner, run_id, pod_id, deadline, token=None, r2=None):
     """Monitor provisioning from the account side until the pod starts or the wait expires."""
-    reserve = runner.ledger.runs()[run_id]["reserve"] if token is not None else None
+    required = token is not None or r2 is not None
+    reserve = runner.ledger.runs()[run_id]["reserve"] if required else None
     while True:
         expired = runner.now() >= deadline
         state = observe_startup(runner.api, pod_id)
         if state == "running":
-            receipt_status = "running" if token is None else None
-            if token is not None:
+            receipt_status = None if required else "running"
+            if required:
                 try:
-                    receipt_status = read_worker_startup(token, run_id, pod_id, reserve)
+                    if r2 is None:
+                        receipt_status = read_worker_startup(token, run_id, pod_id, reserve)
+                    else:
+                        receipt_status = read_worker_startup(None, run_id, pod_id, reserve, r2=r2)
                 except (OSError, ValueError):
                     print("Worker receipt is not yet readable and verified.", flush=True)
             if receipt_status == "failed":
                 raise ValueError(f"pod {pod_id} published a failure receipt during startup; collect after teardown")
             if receipt_status in ("running", "ok"):
                 record_startup(runner.ledger, run_id, pod_id, state=state)
-                if token is not None:
-                    print("Verified the pod worker's private Hub startup receipt.")
+                if required:
+                    transport = "R2" if r2 is not None else "Hub"
+                    print(f"Verified the pod worker's private {transport} startup receipt.")
                 print(f"Pod {pod_id} will pull verified inputs and publish results without a local supervisor.")
                 return 0
         if state == "gone":
-            if token is not None:
+            if required:
                 raise ValueError(f"pod {pod_id} exited before a worker receipt was verified; collect the run")
             print(f"Pod {pod_id} already left the account. Use collect-hf to check for a receipt.")
             return 0
@@ -84,7 +97,7 @@ def watch_startup(runner, run_id, pod_id, deadline, token=None):
     run = runner.ledger.runs()[run_id]
     if not reconcile_startup_cost(runner.api, runner.ledger, run, now=runner.now):
         print("Provider billing is pending. The estimate remains reserved until a later sweep.")
-    if state == "running" and token is not None:
+    if state == "running" and required:
         raise ValueError(f"pod {pod_id} was terminated after its startup deadline without a verified worker receipt")
     raise ValueError(f"pod {pod_id} was terminated after its startup deadline without a container runtime")
 
@@ -98,6 +111,11 @@ def launch(a, profile, api, ledger):
     job = hf_job.parse(raw, a.approved_sha256)
     repo_scope = getattr(a, "hf_repo_scope", None)
     public_repos = getattr(a, "hf_public_train_repo", ())
+    r2_enabled = hf_job.is_r2_output(job)
+    if r2_enabled:
+        hf_job.require(repo_scope is not None and getattr(a, "require_worker_receipt", False),
+                       "R2 outputs require --hf-repo-scope and --require-worker-receipt")
+        hf_job.require(a.hours * 3600 < r2_input.MAX_LIFETIME, "R2 outputs require a wall time below 24 hours")
     if any(item.get("transport") == "r2" for item in job["inputs"]):
         hf_job.require(repo_scope is not None, "presigned R2 inputs require --hf-repo-scope")
     if job["image"].startswith(KRAKEN_TRAIN_IMAGE):
@@ -129,7 +147,8 @@ def launch(a, profile, api, ledger):
     runner = Runner(api, ledger)
     require_worker_receipt = getattr(a, "require_worker_receipt", False)
     startup_token = None
-    if require_worker_receipt:
+    r2 = r2_output.LocalR2(job["output"]["account"]) if r2_enabled else None
+    if require_worker_receipt and r2 is None:
         hf_job.require(repo_scope is not None, "worker receipt verification requires --hf-repo-scope")
         hf_job.require("telemetry" in job, "worker receipt verification requires the telemetry job schema")
         startup_token = load_hf_token()
@@ -150,11 +169,14 @@ def launch(a, profile, api, ledger):
         if quote is None:
             return 0
         if a.dry_run:
+            if r2 is not None:
+                r2.put_urls(job, run_id, now=runner.now(), min_remaining=a.hours * 3600)
             print("Dry run. No pod created. The worker checks private Hub access before training.")
             return 0
         if waited:
             check_hub_inputs(job)
         reserved = runner.now()
+        put_env = r2.put_urls(job, run_id, now=reserved, min_remaining=a.hours * 3600) if r2 is not None else None
         if urls:
             for item in job["inputs"]:
                 if item.get("transport") == "r2":
@@ -182,6 +204,8 @@ def launch(a, profile, api, ledger):
         env["HEOCR_HF_PUBLIC_TRAIN_REPOS"] = " ".join(sorted(set(public_repos)))
     if urls:
         env[r2_input.ENV] = json.dumps(urls, separators=(",", ":"))
+    if put_env is not None:
+        env[r2_output.ENV] = put_env
     if "telemetry" in job:
         env["HEOCR_HF_FINALIZE_LOGS"] = "1"
     if require_worker_receipt:
@@ -207,7 +231,7 @@ def launch(a, profile, api, ledger):
         terminate_confirmed(api, pod_id)
         raise ValueError("unverified or higher billed rate; reconcile the pod and reservation")
     print(f"Pod {pod_id} created. Waiting for container runtime until {startup_deadline.isoformat()}.", flush=True)
-    return watch_startup(runner, run_id, pod_id, startup_deadline, token=startup_token)
+    return watch_startup(runner, run_id, pod_id, startup_deadline, token=startup_token, r2=r2)
 
 
 def validate_receipt(receipt, run_id, pod_id, reserve):
@@ -243,6 +267,13 @@ def validate_receipt(receipt, run_id, pod_id, reserve):
 
 
 def materialize(hub, output, prefix, revision, receipt, destination, cache):
+    def fetch(name, size):
+        return hub.download(output, f"{prefix}/{name}", revision, size)
+
+    materialize_from(fetch, receipt, destination, cache)
+
+
+def materialize_from(fetch, receipt, destination, cache):
     if destination.exists():
         hf_job.require(json.loads((destination / "receipt.json").read_bytes()) == receipt,
                        "existing result directory differs from the verified receipt")
@@ -253,11 +284,26 @@ def materialize(hub, output, prefix, revision, receipt, destination, cache):
     staging.mkdir(mode=0o700)
     for entry in receipt["snapshots"]:
         name, size = entry["name"], entry["size"]
-        path = hub.download(output, f"{prefix}/{name}", revision, size)
+        path = fetch(name, size)
         hf_job.verify_file(path, size, entry["sha256"])
         shutil.copyfile(path, staging / name)
     (staging / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     staging.rename(destination)
+
+
+def read_r2_receipt(r2, run_id, reserve, cache, *, startup_only=False):
+    names = [r2_output.TERMINAL, r2_output.STARTUP]
+    if not startup_only:
+        names[1:1] = [r2_output.progress_name(i) for i in range(len(reserve["snapshots"]), 0, -1)]
+    for name in names:
+        path = r2.fetch(run_id, name, cache / "r2-receipt.json", r2_output.RECEIPT_LIMIT, missing_ok=True)
+        if path is not None:
+            receipt = json.loads(path.read_bytes())
+            hf_job.require(isinstance(receipt, dict)
+                           and (receipt.get("status") == "running") == (name != r2_output.TERMINAL),
+                           "R2 receipt status does not match its object key")
+            return receipt, r2_output.object_key(run_id, name)
+    return None, None
 
 
 def settle_collection(api, ledger, run_id, run, pod_id, revision, receipt):
@@ -278,12 +324,13 @@ def settle_collection(api, ledger, run_id, run, pod_id, revision, receipt):
     else:
         finish = min(now, dt.datetime.fromisoformat(reserve["deadman_utc"]))
     status = "missing_receipt" if receipt is None else receipt["status"]
+    location = {"r2_receipt_key": revision} if hf_job.is_r2_output(reserve) else {"hub_revision": revision}
     with ledger.locked():
         if ledger.runs()[run_id].get("final") == old:
             ledger.final(run_id, pod_type=reserve["pod_type"],
                          hours=max(0, (finish - since).total_seconds() / 3600), usd=usd,
                          status="incomplete" if status == "running" else status, pod_id=pod_id,
-                         hub_revision=revision, usd_source="provider_billing",
+                         **location, usd_source="provider_billing",
                          hours_source="worker_receipt" if finished else "observation_or_deadline_bound")
 
 
@@ -311,20 +358,26 @@ def collect(a, api, ledger):
     results.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".hf-collect-", dir=results) as temp:
         root = Path(temp)
-        try:
-            hub = hf_job.Hub(load_hf_token(), root / "cache")
-        except ImportError:
-            raise ValueError("install the Hub client with pip install '.[render]'") from None
         output = reserve["output"]
-        revision = hub.private_revision(output)
         prefix = f"runs/{run_id}"
-        data = hub.find_receipt(output, prefix, revision)
-        if data is None:
-            hf_job.require(pod_id is not None, "no private Hub receipt and no confirmed pod ID for the reservation")
+        r2 = None
+        if hf_job.is_r2_output(reserve):
+            r2 = r2_output.LocalR2(output["account"])
+            receipt, revision = read_r2_receipt(r2, run_id, reserve, root)
+        else:
+            try:
+                hub = hf_job.Hub(load_hf_token(), root / "cache")
+            except ImportError:
+                raise ValueError("install the Hub client with pip install '.[render]'") from None
+            revision = hub.private_revision(output)
+            data = hub.find_receipt(output, prefix, revision)
+            receipt = json.loads(data.read_bytes()) if data is not None else None
+        if receipt is None:
+            hf_job.require(pod_id is not None, "no private receipt and no confirmed pod ID for the reservation")
             settle_collection(api, ledger, run_id, run, pod_id, revision, None)
-            print(f"Pod {pod_id} is gone and no receipt was found in the verified private Hub revision {revision}.")
+            source = "private R2" if r2 is not None else f"verified private Hub revision {revision}"
+            print(f"Pod {pod_id} is gone and no receipt was found in {source}.")
             return 1
-        receipt = json.loads(data.read_bytes())
         if not pod_id:
             pod_id = receipt.get("pod_id")
             hf_job.require(hf_job.matches(hf_job.POD_ID, pod_id),
@@ -334,7 +387,13 @@ def collect(a, api, ledger):
                            "recovered pod still exists; collect after teardown")
         validate_receipt(receipt, run_id, pod_id, reserve)
         dest = results / run_id
-        materialize(hub, output, prefix, revision, receipt, dest, root)
+        if r2 is not None:
+            def fetch(name, size):
+                return r2.fetch(run_id, name, root / name, size)
+
+            materialize_from(fetch, receipt, dest, root)
+        else:
+            materialize(hub, output, prefix, revision, receipt, dest, root)
     settle_collection(api, ledger, run_id, run, pod_id, revision, receipt)
     print(f"Collected {len(receipt['snapshots'])} verified outputs from {revision} into {dest}.")
     return 0 if receipt["status"] == "ok" else 1

@@ -9,7 +9,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import hf_job, r2_input
+from . import hf_job, r2_input, r2_output
 from .manifest import sha256_file
 
 
@@ -65,14 +65,14 @@ def present(path):
     return path.exists() or path.is_symlink()
 
 
-def publish_ready(job, out, staging, hub, prefix, receipt):
+def publish_ready(job, out, staging, commit, receipt):
     uploaded = {record["name"] for record in receipt["snapshots"]}
     for group in hf_job.checkpoint_groups(job):
         if uploaded.intersection(group) or not all(present(out / name) for name in group):
             continue
         files, entries = zip(*(freeze_output(out / name, staging, limit) for name, limit in group.items()))
         updated = {**receipt, "snapshots": [*receipt["snapshots"], *entries]}
-        hub.commit(job["output"], prefix, updated, files)
+        commit(updated, files)
         receipt["snapshots"].extend(entries)
         for frozen in files:
             frozen.unlink()
@@ -96,15 +96,22 @@ def stop_child(child):
         child.wait()
 
 
-def train(job, root, hub, receipt, *, publish_startup=False):
+def train(job, root, hub, receipt, *, publish_startup=False, r2_publisher=None):
     inp, out, staging = (root / part for part in ("in", "out", "staging"))
     for directory in (inp, out, staging):
         directory.mkdir(mode=0o700)
     prefix = f"runs/{receipt['run_id']}"
-    hub.private_revision(job["output"])
+    if r2_publisher is None:
+        hub.private_revision(job["output"])
+
+        def commit(value, artifacts=()):
+            hub.commit(job["output"], prefix, value, artifacts)
+    else:
+        commit = r2_publisher.commit
     if publish_startup:
-        print("Publishing private Hub startup receipt.", flush=True)
-        hub.commit(job["output"], prefix, receipt)
+        transport = "R2" if r2_publisher is not None else "Hub"
+        print(f"Publishing private {transport} startup receipt.", flush=True)
+        commit(receipt)
     child = None
     try:
         # An approved entrypoint is trusted code. Keep provider and Hub credentials out of its env.
@@ -128,16 +135,20 @@ def train(job, root, hub, receipt, *, publish_startup=False):
                                      cwd=root, env=env, stdin=subprocess.DEVNULL,
                                      stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             while child.poll() is None:
-                publish_ready(job, out, staging, hub, prefix, receipt)
+                publish_ready(job, out, staging, commit, receipt)
                 time.sleep(1)
-            publish_ready(job, out, staging, hub, prefix, receipt)
+            publish_ready(job, out, staging, commit, receipt)
             expected = sum(len(group) for group in hf_job.checkpoint_groups(job))
             hf_job.require(child.returncode == 0 and len(receipt["snapshots"]) == expected,
                            "trainer failed or omitted a checkpoint file")
         receipt["status"] = "ok"
-    except hf_job.PublishError:
-        # A commit may have landed after its response was lost. Preserve that receipt.
-        raise
+    except hf_job.PublishError as exc:
+        if r2_publisher is None:
+            # Preserve a Hub commit whose response may have been lost.
+            raise
+        # R2 progress and terminal receipts have separate keys. Try to save the logs.
+        print(str(exc), flush=True)
+        receipt["status"] = "failed"
     except (Exception, KeyboardInterrupt):
         receipt["status"] = "failed"
     finally:
@@ -161,7 +172,7 @@ def train(job, root, hub, receipt, *, publish_startup=False):
         receipt["snapshots"].append(record)
     if publish_startup:
         print(f"Publishing terminal {receipt['status']} receipt and available logs.", flush=True)
-    hub.commit(job["output"], prefix, receipt, logs)
+    commit(receipt, logs)
     return receipt["status"]
 
 
@@ -179,12 +190,20 @@ def main():
         repo_scope = os.environ.get("HEOCR_HF_REPO_SCOPE")
         public_repos = os.environ.get("HEOCR_HF_PUBLIC_TRAIN_REPOS", "").split()
         if (repo_scope is not None or os.environ.get("HEOCR_HF_REQUIRE_REPO_SCOPE") == "1"
-                or public_repos or any("transport" in item for item in job["inputs"])):
+                or public_repos or hf_job.is_r2_output(job) or any("transport" in item for item in job["inputs"])):
             hf_job.check_repo_scope(job, repo_scope, public_repos)
         root = Path("/heocr")
         root.mkdir(mode=0o700, exist_ok=True)
         run_id = os.environ["HEOCR_HF_RUN_ID"]
         hf_job.require(hf_job.matches(hf_job.RUN_ID, run_id), "invalid run ID")
+        put_env = os.environ.pop(r2_output.ENV, None)
+        publisher = None
+        if hf_job.is_r2_output(job):
+            now = dt.datetime.now(dt.timezone.utc)
+            remaining = int(os.environ["HEOCR_HF_DEADLINE"]) - now.timestamp()
+            hf_job.require(remaining > 0, "R2 output deadline has elapsed")
+            urls = r2_output.check_urls(job, run_id, put_env, now=now, min_remaining=remaining)
+            publisher = r2_output.Publisher(urls, job)
         started = dt.datetime.now(dt.timezone.utc).isoformat()
         receipt = {
             "schema": hf_job.TELEMETRY_RECEIPT if "telemetry" in job else hf_job.RECEIPT,
@@ -193,7 +212,8 @@ def main():
             "started_utc": started, "finished_utc": None, "status": "running", "snapshots": [],
         }
         hub = hf_job.Hub(token("HEOCR_HF_TOKEN"), root / "hub-cache")
-        status = train(job, root, hub, receipt, publish_startup=os.environ.pop("HEOCR_HF_PUBLISH_STARTUP", "") == "1")
+        status = train(job, root, hub, receipt, r2_publisher=publisher,
+                       publish_startup=os.environ.pop("HEOCR_HF_PUBLISH_STARTUP", "") == "1" or publisher is not None)
     except hf_job.PublishError as exc:
         # PublishError is generated by the Hub wrapper and contains no remote response body.
         print(str(exc), flush=True)

@@ -13,6 +13,7 @@ dependencies = []
 
 [project.optional-dependencies]
 render = ["huggingface_hub>=0.33.4,<3"]
+r2 = ["boto3>=1.36,<2"]
 
 [project.scripts]
 heocr-remote = "heocr_compute.remote.cli:main"

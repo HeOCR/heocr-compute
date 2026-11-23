@@ -50,6 +50,34 @@ A v2 job can declare an approved TRAIN archive from the private `heocr-train-pri
 
 Generate an object-scoped [presigned GET](https://developers.cloudflare.com/r2/api/s3/presigned-urls/) from local credentials with a lifetime of at most 24 hours. Pass `HEOCR_R2_URLS` as an in-memory secret environment variable containing a JSON mapping from each R2 target to its URL. Keep it out of job specs, command arguments, shell traces and ledgers. Refresh a URL if it expires while a job is queued. The supervisor consumes the variable before starting the trainer. It refuses redirects and checks byte size and SHA-256 before making the archive visible to the trainer.
 
+### Private R2 output fallback
+
+For a v2 job, set `output` to
+`{"transport":"r2","account":"<32 hex digits>"}` and approve the resulting
+job SHA-256. Use a worker image built with this support and add
+`--hf-repo-scope` and `--require-worker-receipt`. The approved inputs and
+private Hub read credential still work the same way. The worker writes run
+receipts, declared checkpoints, metrics and logs to private R2.
+
+Install `heocr-compute[r2]` on the launching and collecting machine. The local
+signer reads the account ID and Cloudflare API token from the existing
+mode-600 Cloudflare credential file and verifies the token. After capacity
+admission, it signs an exact PUT for each declared object. The URLs expire
+within 24 hours and go only into the pod supervisor's secret environment.
+Neither the SDK nor the long-lived local R2 credential is needed on the pod.
+The dry run checks signing and job admission without creating an object or pod.
+[Cloudflare R2 presigned URLs](https://developers.cloudflare.com/r2/api/s3/presigned-urls/)
+
+Checkpoints and logs are uploaded under the unique run ID. PUTs are create-only.
+The supervisor writes a new receipt only after uploading its artifact files.
+Startup, checkpoint progress and terminal receipts have separate keys. The
+launcher checks the startup receipt against its reservation. After teardown,
+`heocr-remote collect-hf RUN_ID` checks the terminal receipt, or recovers the
+last complete checkpoint if the terminal receipt is absent. It verifies
+each file's size and SHA-256 before exposing local results. A PUT that returns
+an ambiguous result does not count as a confirmed upload.
+[Cloudflare R2 conditional writes](https://developers.cloudflare.com/r2/api/s3/conditional-operations/)
+
 ## Worker and launch
 
 Build the Linux AMD64 image with the repository Dockerfile. It defaults to a pinned Runpod base and installs the checksum-pinned official `runpodctl` binary. An approved replacement base can be passed by digest. The service supplies the pod-scoped credentials at startup. Use the resulting deployed digest in the job specification. For a trainer with additional dependencies, bake those into the reviewed worker before pinning it.
