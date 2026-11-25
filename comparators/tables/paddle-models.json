@@ -1,0 +1,236 @@
+{
+  "PP-DocBlockLayout": {
+    "files": {
+      "inference.json": {
+        "sha256": "abea237f1e53d3dc3bf7ea1321dfebe78552a6070e567dfc94028b622fd575e8",
+        "size": 1081363
+      },
+      "inference.pdiparams": {
+        "sha256": "0ab733dcabfee41517b68b37fde4c696129b88096a93f8b9d8feaa43c27c8942",
+        "size": 128841073
+      },
+      "inference.yml": {
+        "sha256": "3d3d5035825b1a2de3348c646e463798d85b9f8c7c5155a81757172261036e1b",
+        "size": 1619
+      }
+    },
+    "repo": "PaddlePaddle/PP-DocBlockLayout",
+    "revision": "f270657da59d956ab69ffc2c4722fe1f557bf17b"
+  },
+  "PP-DocLayout_plus-L": {
+    "files": {
+      "inference.json": {
+        "sha256": "99bd09c0a1b9e88d35c65c305b91711d98055fc94b4a6eecd50da02e04729384",
+        "size": 1081621
+      },
+      "inference.pdiparams": {
+        "sha256": "24ca3e2e442164505e250deef59f7ee9a54ea12dd32875c9cd6155d959dc97da",
+        "size": 129307978
+      },
+      "inference.yml": {
+        "sha256": "d60f782a16f96afb27e8280399899a94c3e9ffc694ffb2f913ea00af1c522f1e",
+        "size": 1838
+      }
+    },
+    "repo": "PaddlePaddle/PP-DocLayout_plus-L",
+    "revision": "aa52b8528c84f9b1a34ac3a88fe0e576edb9d11d"
+  },
+  "PP-FormulaNet_plus-L": {
+    "files": {
+      "inference.json": {
+        "sha256": "ad259c4b896d99aa3479336b9121112fb40ff1ababfbf8765a3428a3b86df582",
+        "size": 1650354
+      },
+      "inference.pdiparams": {
+        "sha256": "4245c39c181d1d21e472bc85c7434df9b23f177be46552c0542bf153addbc355",
+        "size": 727598255
+      },
+      "inference.yml": {
+        "sha256": "afc92a2737268da0499c37b0b6741da268c369fd7424667fcfeb8fa6c7b22d30",
+        "size": 2244564
+      }
+    },
+    "repo": "PaddlePaddle/PP-FormulaNet_plus-L",
+    "revision": "0809597a77f735bfb35354edb632f2e6dff606f3"
+  },
+  "PP-LCNet_x1_0_doc_ori": {
+    "files": {
+      "inference.json": {
+        "sha256": "3580978602f309c3554508dd85d4fe09b73a7e0d80d7f9e63258f5b72c390c69",
+        "size": 104441
+      },
+      "inference.pdiparams": {
+        "sha256": "e8d6e7c5d264507e40e58a655779059d616b20d7441ea22047d829eb3931989c",
+        "size": 6754166
+      },
+      "inference.yml": {
+        "sha256": "9e195eb729a8173588cd0e8a852c8b373aa606e79e77b4ac7d8346f5426caf26",
+        "size": 766
+      }
+    },
+    "repo": "PaddlePaddle/PP-LCNet_x1_0_doc_ori",
+    "revision": "d3b95a6dff5fe8a94f2748e12b61cb26818a0df8"
+  },
+  "PP-LCNet_x1_0_table_cls": {
+    "files": {
+      "inference.json": {
+        "sha256": "43401e76ed7b0e34787533016ea4ec9193d5b5964c3f948991fc5b531651ef33",
+        "size": 104441
+      },
+      "inference.pdiparams": {
+        "sha256": "d0224afd9cfddf22da17407c6c78491baaa1f25922fbb312c9b0d2037c802db0",
+        "size": 6743918
+      },
+      "inference.yml": {
+        "sha256": "891b1f4b0ccddaf6aca0fce8c8a38e5ab5da9f62fb9adaa7c75e161ee03bb787",
+        "size": 762
+      }
+    },
+    "repo": "PaddlePaddle/PP-LCNet_x1_0_table_cls",
+    "revision": "2fa6323e7dab88fa883081db1460995f46af2922"
+  },
+  "PP-LCNet_x1_0_textline_ori": {
+    "files": {
+      "inference.json": {
+        "sha256": "b81929eeaff8e52db0fafb49c9fbfc5bc0572f81641fe0179cc52096323fb4d4",
+        "size": 104399
+      },
+      "inference.pdiparams": {
+        "sha256": "0de2bcf996cf553e2b848dd7b1769dafffc6917b1ccdf55c1d8efe7909fbf743",
+        "size": 6743918
+      },
+      "inference.yml": {
+        "sha256": "8d5120d0e1a30a9df7ed46aa9119da3796ed066777089d1c1d705f132d5e90f9",
+        "size": 735
+      }
+    },
+    "repo": "PaddlePaddle/PP-LCNet_x1_0_textline_ori",
+    "revision": "cd237a44b0e359d4fe38310a416203cf7403faa5"
+  },
+  "PP-OCRv5_server_det": {
+    "files": {
+      "inference.json": {
+        "sha256": "af5876933d8806a1b50d895867e0781e135cd92ff37381992828fc8d1b842d28",
+        "size": 402480
+      },
+      "inference.pdiparams": {
+        "sha256": "183146fe9d9910352f68482f623bcbbb9fa7b9e8fa1463b9ad288cef00524d2d",
+        "size": 87932887
+      },
+      "inference.yml": {
+        "sha256": "28fb721efc3634fc8aa677e474b9602cb815a91cf569ef357a7a553d7b3ce685",
+        "size": 903
+      }
+    },
+    "repo": "PaddlePaddle/PP-OCRv5_server_det",
+    "revision": "ca867c897ecbca8873081573a802ad70d499cb94"
+  },
+  "PP-OCRv5_server_rec": {
+    "files": {
+      "inference.json": {
+        "sha256": "8e6e12e5d42531840310977fffb58165bf889fc5061408c5a8afdb6985f47fcb",
+        "size": 325204
+      },
+      "inference.pdiparams": {
+        "sha256": "63853f062a5f4089befc16f565a68277618e0da5cb45468b49d11079de0ada77",
+        "size": 84390117
+      },
+      "inference.yml": {
+        "sha256": "2c719dba044c4e2228aef8ff92f5f575394d75d24c16de096a33b7cfd902f66d",
+        "size": 148345
+      }
+    },
+    "repo": "PaddlePaddle/PP-OCRv5_server_rec",
+    "revision": "b26c3587fda8da3c8ec0ce357214b4d661ff1558"
+  },
+  "RT-DETR-L_wired_table_cell_det": {
+    "files": {
+      "inference.json": {
+        "sha256": "abea237f1e53d3dc3bf7ea1321dfebe78552a6070e567dfc94028b622fd575e8",
+        "size": 1081363
+      },
+      "inference.pdiparams": {
+        "sha256": "357321c2845f0a035e8d118622649685a3cdb89d28b09a64e45a5a3df7a9fedc",
+        "size": 128841073
+      },
+      "inference.yml": {
+        "sha256": "edf6d6180f2b9e3e666c744ee5ded38a72c6ef9056cd193250e3e55ba268acef",
+        "size": 1630
+      }
+    },
+    "repo": "PaddlePaddle/RT-DETR-L_wired_table_cell_det",
+    "revision": "e2bd53c06b3a815d86acbf5c6779dada58819cfe"
+  },
+  "RT-DETR-L_wireless_table_cell_det": {
+    "files": {
+      "inference.json": {
+        "sha256": "abea237f1e53d3dc3bf7ea1321dfebe78552a6070e567dfc94028b622fd575e8",
+        "size": 1081363
+      },
+      "inference.pdiparams": {
+        "sha256": "c0f8c9ea07be8916ece73a8acf807bd21aed3ef11969b319c2dccb2406774c34",
+        "size": 128841073
+      },
+      "inference.yml": {
+        "sha256": "f2d0f00ea42aacc162f72a35cf54330e392a7d669e9a1b43896d3bd77a512621",
+        "size": 1633
+      }
+    },
+    "repo": "PaddlePaddle/RT-DETR-L_wireless_table_cell_det",
+    "revision": "25ca86356a601c877476bb0dcc5fd09153d9d64d"
+  },
+  "SLANeXt_wired": {
+    "files": {
+      "inference.json": {
+        "sha256": "5b872f08e74f628ca1db8405db147e82e6e0c7cb358e101fd01cdafc946632d8",
+        "size": 959302
+      },
+      "inference.pdiparams": {
+        "sha256": "ff0362a30f707fa7d27d8453c4396b992fca287377a42d01515bca6eeb3908f5",
+        "size": 364771513
+      },
+      "inference.yml": {
+        "sha256": "abbbd1b4dc6b1a2e9cd34c035514da53a1a6b1ec267292b0b8802025650a33bf",
+        "size": 2066
+      }
+    },
+    "repo": "PaddlePaddle/SLANeXt_wired",
+    "revision": "763069fcda6a065f2171753205a32bf899a88d15"
+  },
+  "SLANet_plus": {
+    "files": {
+      "inference.json": {
+        "sha256": "aba91cd956f4a1648b0f89df94c3cf8acaa066b47e2b689d109843b40d8545a2",
+        "size": 315660
+      },
+      "inference.pdiparams": {
+        "sha256": "012986b0e2bfe90410618bfb4b7cf4fcb6c978caefd84c63c2934f8387b09ab8",
+        "size": 7666515
+      },
+      "inference.yml": {
+        "sha256": "8a6372d3269a6f112fe13a2da7952a84da6e112c10a3146cbb43de5bd01d19fa",
+        "size": 2035
+      }
+    },
+    "repo": "PaddlePaddle/SLANet_plus",
+    "revision": "bae6e5f8c3c4e7da0c0b7639fdf3228fe76184e2"
+  },
+  "UVDoc": {
+    "files": {
+      "inference.json": {
+        "sha256": "2c2bc3e0f15e782cf8f2ad411b5033d99ca504fe88648f8054a5e925ba2336e0",
+        "size": 190986
+      },
+      "inference.pdiparams": {
+        "sha256": "810488899520e0da843b9bd9769ba4949f1c81e357f0eceb12d4a7da459c3eca",
+        "size": 32054311
+      },
+      "inference.yml": {
+        "sha256": "be83d537b358f3ff87740e77e14a83ee9e9a7bb215c33d091b69e8bd5904fe39",
+        "size": 330
+      }
+    },
+    "repo": "PaddlePaddle/UVDoc",
+    "revision": "16c3f0ea9c2f0c6a57e24160f7eeaa7574613fa3"
+  }
+}

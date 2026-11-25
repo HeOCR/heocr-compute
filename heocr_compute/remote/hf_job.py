@@ -25,6 +25,7 @@ POD_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 IMAGE = re.compile(r"[\w./:-]+@sha256:[0-9a-f]{64}", re.ASCII)
 SECRET = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 ARTIFACT_SUFFIXES = (".traineddata", ".checkpoint", "_checkpoint", ".ckpt", ".safetensors", ".pt", ".pth")
+TABLE_OUTPUT_LIMITS = {"rows.jsonl": 8 * 1024 * 1024, "issues.json": 1024 * 1024}
 
 
 class PublishError(ValueError):
@@ -157,8 +158,10 @@ def parse(raw, approved):
     for spec in job["snapshots"]:
         fields(spec, "name max_bytes")
         name = safe_path(spec["name"])
-        require("/" not in name and name not in seen and name.endswith(ARTIFACT_SUFFIXES)
-                and size_ok(spec["max_bytes"]), "invalid or duplicate snapshot")
+        limit = spec["max_bytes"]
+        require("/" not in name and name not in seen and size_ok(limit)
+                and (name.endswith(ARTIFACT_SUFFIXES) or limit <= TABLE_OUTPUT_LIMITS.get(name, 0)),
+                "invalid or duplicate snapshot")
         seen.add(name)
     if telemetry_enabled:
         names = [*final_logs(job), *(name for group in checkpoint_groups(job) for name in group)]

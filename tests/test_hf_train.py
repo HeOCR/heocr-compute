@@ -65,6 +65,18 @@ class HfTrainTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "full revision"):
             hf_job.parse(self.jobfile.read_bytes(), self.args.approved_sha256)
 
+    def test_table_predictions_allow_only_fixed_bounded_names(self):
+        self.job["snapshots"] = [{"name": "rows.jsonl", "max_bytes": 8 * 1024 * 1024},
+                                 {"name": "issues.json", "max_bytes": 1024 * 1024}]
+        self.write_job()
+        self.assertEqual(hf_job.parse(self.jobfile.read_bytes(), self.args.approved_sha256), self.job)
+        for item in ({"name": "other.jsonl", "max_bytes": 8},
+                     {"name": "rows.jsonl", "max_bytes": 8 * 1024 * 1024 + 1}):
+            self.job["snapshots"][0] = item
+            self.write_job()
+            with self.assertRaisesRegex(ValueError, "invalid or duplicate snapshot"):
+                hf_job.parse(self.jobfile.read_bytes(), self.args.approved_sha256)
+
     def test_only_spec_and_secret_reference_at_launch(self):
         with patch.object(Policy, "load", return_value=Policy()), contextlib.redirect_stdout(io.StringIO()) as stdout:
             self.assertEqual(hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger), 0)

@@ -1,0 +1,68 @@
+name: Build table comparator images
+
+on:
+  pull_request:
+    paths:
+      - comparators/tables/**
+      - docker/comparators/Dockerfile
+      - .github/workflows/publish-table-comparator-images.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [paddle, tatr]
+    env:
+      LANE: ${{ matrix.lane }}
+      IMAGE: ghcr.io/heocr/heocr-compute-train
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build the pinned Linux AMD64 runtime
+        run: |
+          context="$RUNNER_TEMP/table-comparator-context"
+          mkdir "$context"
+          git archive "$GITHUB_SHA" comparators docker/comparators docker/hf-train-entrypoint.sh \
+            pyproject.toml heocr_compute | tar -x -C "$context"
+          docker buildx build --platform linux/amd64 --target "tables-$LANE" --load \
+            --provenance=false --sbom=false --tag "table-comparator:$LANE" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --file "$context/docker/comparators/Dockerfile" "$context"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "table-comparator:$LANE")" = linux/amd64
+      - name: Initialize both adapter and checked weights offline
+        run: |
+          docker run --rm --network none --entrypoint /opt/tables/bin/python "table-comparator:$LANE" \
+            /opt/table-comparator/smoke.py "$LANE"
+          docker run --rm --network none --entrypoint tesseract "table-comparator:$LANE" --version \
+            | sed -n '1p' | grep -Fx 'tesseract 5.5.3'
+      - name: Publish the immutable image
+        if: github.event_name == 'workflow_dispatch' && github.repository == 'HeOCR/heocr-compute' && github.ref == 'refs/heads/main'
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          tag="$IMAGE:tables-$LANE-sha-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker tag "table-comparator:$LANE" "$tag"
+          docker push "$tag"
+          digest="$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          config="$(mktemp -d)"
+          printf '{}\n' > "$config/config.json"
+          docker --config "$config" pull --platform linux/amd64 "$IMAGE@$digest"
+          printf '%s OCI pin: `%s@%s`\n' "$LANE" "$IMAGE" "$digest" >> "$GITHUB_STEP_SUMMARY"
