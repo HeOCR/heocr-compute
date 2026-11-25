@@ -23,7 +23,8 @@ JOB = {
 }
 
 
-def create_urls(method="PutObject", seconds=3600, signed_headers=r2_output.SIGNED_HEADERS):
+def create_urls(method="PutObject", seconds=3600, signed_headers=r2_output.SIGNED_HEADERS,
+                bucket=r2_input.BUCKET):
     urls = {}
     for name in r2_output.object_names(JOB):
         query = urlencode({
@@ -36,7 +37,7 @@ def create_urls(method="PutObject", seconds=3600, signed_headers=r2_output.SIGNE
             "x-id": method,
         })
         key = quote(r2_output.object_key(RUN, name))
-        urls[name] = f"https://{ACCOUNT}.r2.cloudflarestorage.com/{r2_input.BUCKET}/{key}?{query}"
+        urls[name] = f"https://{ACCOUNT}.r2.cloudflarestorage.com/{bucket}/{key}?{query}"
     return urls
 
 
@@ -56,6 +57,38 @@ class R2OutputTest(unittest.TestCase):
             self.assertNotIn("X-Amz", str(caught.exception))
         with self.assertRaisesRegex(ValueError, "expired"):
             r2_output.check_urls(JOB, RUN, json.dumps(urls), now=NOW, min_remaining=3600)
+
+    def test_named_bucket_rejects_default_and_cross_bucket_signatures(self):
+        bucket = "invented-output"
+        job = {**JOB, "output": {**JOB["output"], "bucket": bucket}}
+        urls = create_urls(bucket=bucket)
+        self.assertEqual(r2_output.check_urls(job, RUN, json.dumps(urls), now=NOW), urls)
+        for bad in (create_urls(), create_urls(bucket="other-output")):
+            with self.assertRaisesRegex(ValueError, "mismatched presigned R2"):
+                r2_output.check_urls(job, RUN, json.dumps(bad), now=NOW)
+
+    def test_scoped_credentials_require_exact_scope_and_safe_file(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(Path, "home", return_value=Path(temp)):
+            config_dir = Path(temp) / ".config/heocr"
+            config_dir.mkdir(parents=True)
+            path = config_dir / "r2-output.env"
+            key, secret = "b" * 32, "c" * 64
+            path.write_text(f"R2_ACCOUNT_ID={ACCOUNT}\nR2_BUCKET=invented-output\n"
+                            f"R2_ACCESS_KEY_ID={key}\nR2_SECRET_ACCESS_KEY={secret}\n")
+            path.chmod(0o600)
+            self.assertEqual(r2_output.scoped_credentials(ACCOUNT, "invented-output"), (key, secret))
+            for account, bucket in ((ACCOUNT, "other-output"), ("d" * 32, "invented-output")):
+                with self.assertRaisesRegex(ValueError, "matching bucket-scoped"):
+                    r2_output.scoped_credentials(account, bucket)
+            path.chmod(0o644)
+            with self.assertRaises(ValueError):
+                r2_output.scoped_credentials(ACCOUNT, "invented-output")
+            path.chmod(0o600)
+            original = path.with_suffix(".saved")
+            path.rename(original)
+            path.symlink_to(original)
+            with self.assertRaises(ValueError):
+                r2_output.scoped_credentials(ACCOUNT, "invented-output")
 
     def test_streams_create_only_put_and_redacts_provider_error(self):
         urls = create_urls()
