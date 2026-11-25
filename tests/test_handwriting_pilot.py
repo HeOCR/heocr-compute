@@ -77,6 +77,16 @@ class HandwritingPilotTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "separate CLEAN and non-partner RunPod clearance"):
                     self.prepare()
 
+    def test_mac_local_source_still_requires_clean_and_non_partner_metadata(self):
+        self.source["runpod_allowed"] = False
+        self.stage()
+        result = trainer.prepare(self.manifest, self.archive, self.destination, local=True)
+        self.assertEqual(result, {"fit": 1, "monitor": 1})
+        self.source["partner"] = True
+        self.stage()
+        with self.assertRaisesRegex(ValueError, "non-partner"):
+            trainer.prepare(self.manifest, self.archive, self.destination, local=True)
+
     def test_archive_rejects_extra_paths(self):
         self.entries["../escape.png"] = b"unexpected"
         self.stage()

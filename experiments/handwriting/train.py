@@ -1,5 +1,6 @@
 """Prepare exact, cloud-cleared TRAIN pairs and continue Kraken PP-OCRv6."""
 
+import argparse
 import hashlib
 from importlib.metadata import version
 import json
@@ -29,7 +30,7 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def rows_from_manifest(manifest):
+def rows_from_manifest(manifest, *, local=False):
     if (not isinstance(manifest, dict) or manifest.get("schema") != "heocr.handwriting_train.v1"
             or manifest.get("split") != "train" or not isinstance(manifest.get("sources"), list)
             or not isinstance(manifest.get("rows"), list)
@@ -41,8 +42,10 @@ def rows_from_manifest(manifest):
             raise ValueError("invalid TRAIN source record")
         key = source.get("id")
         if (not matches(ID, key) or key in sources or not matches(SHA256, source.get("clean_sha256"))
-                or source.get("runpod_allowed") is not True or source.get("partner") is not False):
-            raise ValueError("every source needs separate CLEAN and non-partner RunPod clearance")
+                or type(source.get("runpod_allowed")) is not bool or source.get("partner") is not False):
+            raise ValueError("every source needs separate CLEAN and non-partner RunPod clearance metadata")
+        if not local and not source["runpod_allowed"]:
+            raise ValueError("every remote source needs separate CLEAN and non-partner RunPod clearance")
         sources[key] = source
 
     ids, groups, crops, roles, used = set(), {}, {}, set(), set()
@@ -66,10 +69,10 @@ def rows_from_manifest(manifest):
     return rows
 
 
-def prepare(manifest_path, archive_path, destination):
+def prepare(manifest_path, archive_path, destination, *, local=False):
     """Extract only the exact manifest members and return Kraken's two path lists."""
     manifest = json.loads(manifest_path.read_bytes())
-    rows = rows_from_manifest(manifest)
+    rows = rows_from_manifest(manifest, local=local)
     if digest(archive_path) != manifest["archive_sha256"]:
         raise ValueError("TRAIN archive SHA-256 mismatch")
     lists = {role: [] for role in ROLES}
@@ -102,7 +105,7 @@ def prepare(manifest_path, archive_path, destination):
     return {role: len(paths) for role, paths in lists.items()}
 
 
-def run(root):
+def run(root, *, local=False):
     if version("kraken") != "7.2":
         raise RuntimeError("the pilot requires Kraken 7.2")
     inputs = root / "in"
@@ -111,7 +114,7 @@ def run(root):
         raise ValueError("unexpected starter checkpoint")
     with tempfile.TemporaryDirectory(prefix="handwriting-pilot-", dir=root) as scratch:
         work = Path(scratch)
-        counts = prepare(inputs / "manifest.json", inputs / "lines.tar", work)
+        counts = prepare(inputs / "manifest.json", inputs / "lines.tar", work, local=local)
         print(f"TRAIN fit {counts['fit']}, TRAIN monitor {counts['monitor']}", flush=True)
         cmd = [str(Path(sys.executable).with_name("ketos")), "--device", "cpu", "--seed", "20261125",
                "--deterministic", "--workers", "0", "--threads", "8", "train", "--arch", "ppocrv6",
@@ -137,4 +140,6 @@ def run(root):
 
 
 if __name__ == "__main__":
-    run(Path.cwd())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--local", action="store_true", help="Use a Mac-local TRAIN handoff")
+    run(Path.cwd(), local=parser.parse_args().local)
