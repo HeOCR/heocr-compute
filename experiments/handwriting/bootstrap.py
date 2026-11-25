@@ -82,9 +82,11 @@ def read_fonts(root):
 
 def render(text, family, raw, seed, env):
     rng = random.Random(seed)
+    markup = raw.with_suffix(".pango")
+    markup.write_text(f'<span fallback="false">{escape(text)}</span>', encoding="utf-8")
     subprocess.run(["pango-view", "--no-display", "--pixels", "--rtl", "--language=he", "--single-par",
                     "--margin=12", f"--font={family} {rng.randint(34, 52)}", "--markup",
-                    f'--text=<span fallback="false">{escape(text)}</span>', f"--output={raw}"],
+                    f"--output={raw}", str(markup)],
                    env=env, check=True, capture_output=True)
     with Image.open(raw) as source:
         image = source.convert("L")
@@ -115,6 +117,8 @@ def stage(args):
         raise ValueError("invalid source id")
     units = clean_rows(args.clean_root, args.clean_sha256)
     work_hash = {work: sha256(f"{SEED}:{work}".encode()).hexdigest() for _, work, _ in units}
+    if len(work_hash) < 3:
+        raise ValueError("need at least three source works for fit and the TRAIN monitor")
     monitor = set(sorted(work_hash, key=work_hash.__getitem__)[:2])
     args.output.mkdir(mode=0o700)
     archive_path = args.output / "lines.tar"

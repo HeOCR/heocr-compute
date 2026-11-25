@@ -107,6 +107,14 @@ class RegisteredHandwritingTest(unittest.TestCase):
         self.assertLess(guarded["paired_95pct_pp"][1], 0)
         self.assertEqual(guarded["verdict"], "not improved")
 
+    def test_bootstrap_resamples_whole_writer_clusters(self):
+        rows = [{"group": f"writer-{writer}", "chars": 10,
+                 "edits": {"candidate": 10 if writer < 2 else 0,
+                           "stock": 0 if writer < 2 else 10}}
+                for writer in range(4) for _ in range(25)]
+        self.assertEqual(compare.paired(rows), [-100, 100])
+        self.assertEqual(compare.paired(list(reversed(rows))), [-100, 100])
+
     def test_claim_blocks_retry_after_reader_failure(self):
         self.stage(4, 29)
         self.args.candidate = self.root / "candidate"
