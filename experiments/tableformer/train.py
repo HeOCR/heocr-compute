@@ -41,8 +41,8 @@ def load_manifest(args):
         from p3 import bbox_targets, capture_contract, checked_crop
 
         capture = capture_contract(manifest)
-        if capture.get("mode") == "direct_phone" and clean.get("remote_transfer") is not True:
-            raise ValueError("direct phone P3 requires exact TRAIN and remote-transfer approval")
+        if capture.get("mode") in ("direct_phone", "proposal_crops") and clean.get("remote_transfer") is not True:
+            raise ValueError("phone P3 requires exact TRAIN and remote-transfer approval")
     examples = manifest["examples"]
     if not examples or len({x["id"] for x in examples}) != len(examples):
         raise ValueError("TRAIN manifest must have unique fragment IDs")
@@ -192,38 +192,54 @@ def run(args):
     before = {} if p3 else {key: p.detach().clone() for key, p in head.named_parameters()}
     opt = torch.optim.AdamW(parameters, lr=args.lr, foreach=False, fused=False,
                             weight_decay=0.0 if p3 else 0.01)
+    schedule = None
+    validation_order = []
+    epoch_order = list(range(len(examples)))
+    if p3 and not args.smoke:
+        raw_manifest = args.manifest.read_bytes()
+        if sha256(raw_manifest).hexdigest() != args.manifest_sha256:
+            raise ValueError("TRAIN manifest changed during intake")
+        manifest = json.loads(raw_manifest)
+        if manifest["p3"].get("mode") == "proposal_crops":
+            from p3 import check_schedule
+            epoch_order, validation_order = check_schedule(manifest)
+            schedule = manifest["p3_schedule"]
+
+    def loss_for(example, verify=False):
+        raw, tokens, *geometry = example
+        with Image.open(BytesIO(raw)) as img:
+            # Match Docling's RGB crop array passed to TFPredictor.
+            rgb = np.asarray(img.convert("RGB"))
+        tokens = ["<start>", *tokens, "<end>"]
+        ids = torch.tensor([vocab[tag] for tag in tokens], device=args.device).view(-1, 1)
+        with torch.no_grad():
+            enc = model._encoder(predictor._prepare_image(rgb))
+            memory = memory_for(model, enc)
+            if not p3:
+                hidden = teacher_hidden(transformer, memory, ids[:-1])
+            if verify:
+                check_teacher(transformer, memory, ids[:-1],
+                              teacher_hidden(transformer, memory, ids[:-1]) if p3 else hidden)
+        if p3:
+            hidden = teacher_hidden(transformer, memory, ids[:-1])
+        logits = head(hidden).squeeze(1)
+        loss = torch.nn.functional.cross_entropy(logits, ids[1:, 0])
+        if p3:
+            box, cls = p3_loss(model, teacher, enc, memory, hidden, ids, geometry[0])
+            loss = loss + 2.0 * box + 0.1 * cls
+        if not torch.isfinite(loss):
+            raise ValueError("non-finite training or validation loss")
+        return loss, box.item() if p3 else 0.0, cls.item() if p3 else 0.0
+
     steps, losses = 0, []
-    p3_losses = []
+    p3_losses, validation_losses = [], []
+    best_state = None
     for epoch in range(args.epochs):
-        order = list(range(len(examples)))
+        order = epoch_order.copy()
         randomizer.shuffle(order)
         total = box_total = class_total = 0.0
         for idx in order:
-            raw, tokens, *geometry = examples[idx]
-            with Image.open(BytesIO(raw)) as img:
-                # Match Docling's page.get_image() array passed to TFPredictor.
-                rgb = np.asarray(img.convert("RGB"))
-            tokens = ["<start>", *tokens, "<end>"]
-            ids = torch.tensor([vocab[tag] for tag in tokens], device=args.device).view(-1, 1)
-            with torch.no_grad():
-                enc = model._encoder(predictor._prepare_image(rgb))
-                memory = memory_for(model, enc)
-                if not p3:
-                    hidden = teacher_hidden(transformer, memory, ids[:-1])
-                if args.smoke and steps == 0:
-                    check_teacher(transformer, memory, ids[:-1],
-                                  teacher_hidden(transformer, memory, ids[:-1]) if p3 else hidden)
-            if p3:
-                hidden = teacher_hidden(transformer, memory, ids[:-1])
-            logits = head(hidden).squeeze(1)
-            loss = torch.nn.functional.cross_entropy(logits, ids[1:, 0])
-            if p3:
-                box, cls = p3_loss(model, teacher, enc, memory, hidden, ids, geometry[0])
-                loss = loss + 2.0 * box + 0.1 * cls
-                box_total += box.item()
-                class_total += cls.item()
-            if not torch.isfinite(loss):
-                raise ValueError("non-finite training loss")
+            loss, box, cls = loss_for(examples[idx], verify=args.smoke and steps == 0)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             if p3:
@@ -231,9 +247,21 @@ def run(args):
             opt.step()
             steps += 1
             total += loss.item()
-        losses.append(total / len(examples))
+            box_total += box
+            class_total += cls
+        losses.append(total / len(order))
         if p3:
-            p3_losses.append({"box": box_total / len(examples), "class_kl": class_total / len(examples)})
+            p3_losses.append({"box": box_total / len(order), "class_kl": class_total / len(order)})
+        if validation_order:
+            with torch.no_grad():
+                score = sum(loss_for(examples[idx])[0].item() for idx in validation_order) / len(validation_order)
+            validation_losses.append(score)
+            if len(validation_losses) > 1 and score >= min(validation_losses[:-1]):
+                break
+            best_state = {key: value.detach().cpu().clone() for key,value in model.state_dict().items()}
+            best_step, best_epoch = steps, epoch + 1
+    if best_state is not None:
+        model.load_state_dict(best_state)
     changed = [] if p3 else sorted(key for key, p in head.named_parameters()
                                     if not torch.equal(p.detach(), before[key]))
     if not p3 and not changed:
@@ -259,6 +287,13 @@ def run(args):
         record["updated"] = [key for key, row in difference["trainable_tensors"].items()
                              if row["changed_elements"]]
         record["harness_files"]["p3.py"] = digest(Path(__file__).with_name("p3.py"))
+        if schedule is not None:
+            record["train_internal_selection"] = {
+                "rows": len(validation_order), "losses": validation_losses,
+                "selected_epoch": best_epoch, "selected_step": best_step,
+                "probe_ids": schedule["probe_ids"], "carrier_steps": schedule["carrier_steps"],
+                "hard_steps": schedule["hard_steps"],
+            }
     (args.output / "receipt.json").write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 
 

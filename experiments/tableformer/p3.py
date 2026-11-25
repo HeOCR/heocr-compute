@@ -1,5 +1,6 @@
 """Geometry targets and checkpoint audit for the P3 TableFormer recipe."""
 
+from collections import Counter
 import math
 import re
 
@@ -22,7 +23,7 @@ def capture_contract(manifest):
     capture = manifest.get("p3")
     require_pins(capture, ("hdocsyngen_recipe_sha256",))
     mode = capture.get("mode", "rectified_phone")
-    if mode == "direct_phone":
+    if mode in ("direct_phone", "proposal_crops"):
         if any(key.startswith("rectif") for key in capture):
             raise ValueError("direct phone capture contract includes rectification")
         require_pins(capture, ("scanifier_fit_input_sha256", "scanifier_bank_sha256"))
@@ -30,6 +31,13 @@ def capture_contract(manifest):
             r"[0-9a-f]{40}", capture["phone_route_revision"]
         ):
             raise ValueError("missing direct phone proposal route revision")
+        if mode == "proposal_crops":
+            require_pins(capture, ("heron_model_sha256",))
+            recipes = capture.get("carrier_recipe_sha256")
+            if not isinstance(recipes, list) or not recipes or any(
+                not isinstance(pin, str) or not SHA.fullmatch(pin) for pin in recipes
+            ):
+                raise ValueError("proposal crops require pinned carrier recipes")
     elif mode == "rectified_phone":
         require_pins(capture, ("rectifier_sha256", "rectifier_config_sha256", "rectifier_verdict_sha256"))
     else:
@@ -42,12 +50,15 @@ def capture_contract(manifest):
 
 def checked_crop(item, capture, size):
     route = item.get("p3")
-    require_pins(route, ("source_page_sha256", "captured_page_sha256", "phone_fit_sha256"))
-    if route.get("accepted") is not True or route["phone_fit_sha256"] not in capture["scanifier_fit_sha256"]:
+    mode = capture.get("mode", "rectified_phone")
+    require_pins(route, ("source_page_sha256", "captured_page_sha256"))
+    field, allowed = (("carrier_recipe_sha256", capture["carrier_recipe_sha256"])
+                      if mode == "proposal_crops" else ("phone_fit_sha256", capture["scanifier_fit_sha256"]))
+    if route.get("accepted") is not True or route.get(field) not in allowed:
         raise ValueError("P3 requires an accepted phone view from a pinned fit")
-    if capture.get("mode") == "direct_phone":
+    if mode in ("direct_phone", "proposal_crops"):
         require_pins(route, ("phone_warp_sha256",))
-        if (route.get("mode") != "direct_phone" or any(key.startswith("rectif") for key in route)
+        if (route.get("mode") != mode or any(key.startswith("rectif") for key in route)
                 or route.get("phone_route_revision") != capture["phone_route_revision"]):
             raise ValueError("P3 requires the exact direct phone route")
         extent = route.get("captured_size", [])
@@ -69,6 +80,36 @@ def checked_crop(item, capture, size):
     if not (0 <= left < right <= extent[0] and 0 <= top < bottom <= extent[1]
             and size == (right - left, bottom - top)):
         raise ValueError("P3 table crop disagrees with the declared raster")
+
+
+def check_schedule(manifest):
+    """Return the signed visit order and document-disjoint stopping rows."""
+    schedule = manifest.get("p3_schedule")
+    if not isinstance(schedule, dict):
+        raise ValueError("proposal crops require a TRAIN-internal stopping schedule")
+    try:
+        fit, validation, probe = (schedule[name] for name in ("fit_ids", "validation_ids", "probe_ids"))
+        rows = manifest["examples"]
+        indices = {r["id"]: idx for idx, r in enumerate(rows)}
+        fit_rows = [rows[indices[name]] for name in fit]
+        validation_rows = [rows[indices[name]] for name in validation]
+    except (KeyError, TypeError):
+        raise ValueError("P3 schedule and asset IDs differ") from None
+    train_sources = {r["source_id"] for r in fit_rows}
+    validation_sources = {r["source_id"] for r in validation_rows}
+    if (not fit or not validation or not probe or len(fit) > 256
+            or len(set(validation)) != len(validation) or len(set(probe)) != len(probe)
+            or not set(probe).issubset(validation)
+            or set(indices) != set(fit) | set(validation) or train_sources & validation_sources
+            or schedule.get("patience") != 1
+            or schedule.get("objective") != "mean_token_ce_plus_2_bbox_smooth_l1_plus_0.1_class_kl"):
+        raise ValueError("P3 requires an exact document-disjoint TRAIN schedule")
+    carriers = Counter(r["carrier"] for r in fit_rows)
+    hard = sum(bool(r["hard_family"]) for r in fit_rows)
+    if (set(carriers) != {"phone", "scanner", "native"} or schedule["carrier_steps"] != carriers
+            or schedule["hard_steps"] != hard):
+        raise ValueError("P3 scheduled carrier or hard-structure counts differ")
+    return [indices[name] for name in fit], [indices[name] for name in validation]
 
 
 def cell_box(cell, size):
