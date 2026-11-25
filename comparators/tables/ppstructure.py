@@ -4,6 +4,8 @@ import copy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from PIL import Image
+
 from grids import paddle_table
 
 
@@ -36,6 +38,8 @@ def predictor(models, read_cell):
 
     def predict(image, page, source):
         pred, = reader.predict(str(source))
+        # Paddle reports cell coordinates after its default document preprocessing.
+        processed = Image.fromarray(pred["doc_preprocessor_res"]["output_img"][..., ::-1])
         layout = [box["coordinate"] for box in pred["layout_det_res"]["boxes"]
                   if box["label"].lower() == "table"]
         tables, issues = [], []
@@ -43,7 +47,7 @@ def predictor(models, read_cell):
             bbox = list(map(float, layout[index])) if index < len(layout) else None
             boxes = item["cell_box_list"]
             try:
-                result, joined = paddle_table(item["pred_html"], boxes, image, page, bbox, read_cell)
+                result, joined = paddle_table(item["pred_html"], boxes, processed, page, bbox, read_cell)
             except ValueError:
                 issues.append("invalid_predicted_grid")
                 continue
