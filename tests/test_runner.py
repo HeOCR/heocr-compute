@@ -109,7 +109,7 @@ class FakeRemote:
                                 if rel in command)
         return ok
 
-    def upload(self, root, rels, dest):
+    def upload(self, root, rels, dest, *, timeout=None):
         self.uploaded = list(rels)
 
     def download(self, src, rels, dest):
@@ -171,6 +171,54 @@ class RunnerTest(unittest.TestCase):
 
     def final(self):
         return [e for e in self.ledger.events() if e["event"] == "final"]
+
+    def test_autonomous_archive_detaches_only_after_startup_and_preserves_budget(self):
+        remote = FakeRemote(dict(OUT))
+        settings = {"account": "a" * 32, "bucket": "invented-archive", "max_bytes": 2 << 30}
+        credentials = self.inputs.parent / "invented-credential.env"
+        remote_commands = remote.run
+
+        def capture(command, input=None, **kwargs):
+            if "cat > /heocr/.archive-secret" in command:
+                remote.secret = json.loads(input)
+            return remote_commands(command, input=input, **kwargs)
+
+        remote.run = capture
+        with mock.patch("heocr_compute.remote.r2_archive.ArchiveStore") as store:
+            store.return_value.scope = settings
+            store.return_value.urls.return_value = {"invented": "presigned-secret"}
+            result = self.make(remote).run(self.spec(archive_credentials=credentials))
+        self.assertEqual(result["status"], "archive_running", result)
+        state = self.ledger.runs()[result["run_id"]]
+        self.assertEqual(state["reserve"]["r2_archive"], settings)
+        self.assertEqual(state["startup"]["status"], "running")
+        self.assertNotIn("presigned-secret", json.dumps(state))
+        self.assertEqual(remote.secret["urls"], {"invented": "presigned-secret"})
+        self.assertFalse(any("presigned-secret" in cmd for cmd in remote.commands))
+        self.assertEqual(self.api.terminated, [])
+        self.assertEqual(self.final(), [])
+        self.assertFalse(self.results.exists())
+        self.assertEqual(sweep(self.api, self.ledger, now=lambda: NOW, pid_alive=lambda _: False,
+                               sleep=self.clock.sleep, out=lambda *_: None), [])
+
+    def test_autonomous_archive_ready_failure_terminates_the_pod(self):
+        remote = FakeRemote(dict(OUT))
+        remote_call = remote.run
+
+        def not_ready(command, **kwargs):
+            if command == "test -f /heocr/archive.ready":
+                return SimpleNamespace(returncode=1)
+            return remote_call(command, **kwargs)
+
+        remote.run = not_ready
+        with mock.patch("heocr_compute.remote.r2_archive.ArchiveStore") as store:
+            store.return_value.scope = {"account": "a" * 32, "bucket": "invented-archive", "max_bytes": 2 << 30}
+            store.return_value.urls.return_value = {}
+            result = self.make(remote).run(self.spec(archive_credentials=self.inputs.parent / "credentials"))
+        self.assertEqual(result["status"], "error")
+        self.assertIn("did not acknowledge startup", result["error"])
+        self.assertEqual(self.api.terminated, ["pod1"])
+        self.assertEqual(self.final()[0]["status"], "error")
 
     def test_end_to_end(self):
         remote = FakeRemote(dict(OUT))

@@ -16,6 +16,7 @@ MAX_LIFETIME = 24 * 60 * 60
 
 def check_url(pin, url, *, now, min_remaining, signed_headers="host", method="GET", bucket=BUCKET):
     """Match the endpoint, object and lifetime independently of the signed URL."""
+    operations = {"GET": "GetObject", "PUT": "PutObject", "HEAD": "HeadObject"}
     try:
         if not isinstance(url, str) or not url.isascii() or len(url) > 4096 or not url.isprintable():
             raise ValueError
@@ -32,8 +33,7 @@ def check_url(pin, url, *, now, min_remaining, signed_headers="host", method="GE
             and parsed.path == f"/{bucket}/{quote(pin['path'], safe='/')}"
             and len(query) == len(pairs) and query["X-Amz-Algorithm"] == "AWS4-HMAC-SHA256"
             and query["X-Amz-SignedHeaders"] == signed_headers and len(signature) == 64
-            and query.get("x-id", {"GET": "GetObject", "PUT": "PutObject"}[method])
-            == {"GET": "GetObject", "PUT": "PutObject"}[method]
+            and query.get("x-id", operations[method]) == operations[method]
             and all(char in "0123456789abcdef" for char in signature)
             and len(claims) == 5 and claims[-4:] == [start.strftime("%Y%m%d"), "auto", "s3", "aws4_request"]
             and 0 < ttl <= MAX_LIFETIME and start <= now + dt.timedelta(minutes=1)

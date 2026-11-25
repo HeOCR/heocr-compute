@@ -85,7 +85,8 @@ def _spec(a, p: profiles.Profile, manifest_path, root, cmd, run_cap) -> Spec:
                 results=Path(a.results).expanduser() if getattr(a, "results", None) else None,
                 max_pull_gb=getattr(a, "max_pull_gb", 2.0), max_upload_gb=getattr(a, "max_upload_gb", 20.0),
                 dry_run=a.dry_run, yes=a.yes,
-                capacity_wait_hours=getattr(a, "capacity_wait_hours", DEFAULT_CAPACITY_WAIT_HOURS))
+                capacity_wait_hours=getattr(a, "capacity_wait_hours", DEFAULT_CAPACITY_WAIT_HOURS),
+                archive_credentials=getattr(a, "r2_archive_credentials", None))
 
 
 def _report(res) -> int:
@@ -93,13 +94,20 @@ def _report(res) -> int:
     if res.get("deadman"):
         print(f"dead-man's switch: {res['deadman']}" +
               (f", self-removal: {res['self_removal']}" if res.get("self_removal") else ""))
-    return 0 if res["status"] in ("ok", "dry_run", "declined") else 1
+    return 0 if res["status"] in ("ok", "dry_run", "declined", "archive_running") else 1
 
 
 def cmd_run(a):
     root = Path(a.root) if a.root else Path(a.manifest).resolve().parent
     spec = _spec(a, _profile(a), a.manifest, root, a.cmd, a.run_cap)
     return _report(Runner(*_connect()).run(spec))
+
+
+def cmd_collect_archive(a):
+    from .r2_archive import collect
+
+    api, ledger = _connect()
+    return collect(api, ledger, a.run_id, a.r2_archive_credentials, Path(a.results).expanduser())
 
 
 def cmd_render(a):
@@ -233,6 +241,8 @@ def main(argv=None) -> int:
     r.add_argument("--pull", action="append", help="glob of out/ files to bring back (default: all returnable)")
     r.add_argument("--pull-intermediate", action="store_true", help="also bring back intermediate checkpoints")
     r.add_argument("--max-upload-gb", type=float, default=20.0)
+    r.add_argument("--r2-archive-credentials", type=Path,
+                   help="launch an autonomous private R2 return of out/output.tar using a mode-600 credential file")
     run_flags(r)
     r.set_defaults(fn=cmd_run)
 
@@ -282,6 +292,12 @@ def main(argv=None) -> int:
     collect.set_defaults(fn=cmd_collect_hf)
     collect.add_argument("run_id")
     collect.add_argument("--results", default="~/heocr-remote/results")
+
+    archive = sub.add_parser("collect-archive", help="verify and pull one private R2 archive after pod teardown")
+    archive.set_defaults(fn=cmd_collect_archive)
+    archive.add_argument("run_id")
+    archive.add_argument("--r2-archive-credentials", type=Path, required=True)
+    archive.add_argument("--results", default="~/heocr-remote/results")
 
     s = sub.add_parser("smoke", help=f"the smallest end-to-end run (capped at ${SMOKE_CAP_USD:.2f})")
     run_flags(s)

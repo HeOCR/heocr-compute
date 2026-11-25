@@ -343,7 +343,7 @@ def collect(a, api, ledger):
     hf_job.require(hf_job.matches(hf_job.RUN_ID, run_id), "invalid run ID")
     run = ledger.runs().get(run_id, {})
     reserve = run.get("reserve", {})
-    hf_job.require(reserve.get("autonomous") and reserve.get("account") == ledger.account,
+    hf_job.require(reserve.get("autonomous") and not reserve.get("r2_archive") and reserve.get("account") == ledger.account,
                    "unknown autonomous reservation for this account")
     pod_record = run.get("pod", {})
     pod_id = pod_record.get("pod_id")

@@ -9,6 +9,7 @@ Every pod is terminated at the end, whether the job succeeded or failed.
 Python 3.11 or later. The core runner uses the standard library. The optional line-render publisher and autonomous training collector use the Hugging Face Hub client.
 
 See [autonomous private Hub training](docs/autonomous-hf-training.md) for approved jobs that pull inputs on the pod and return snapshots through the private Hub.
+For jobs staged from open roots that return one verified tar, see [autonomous private R2 archive return](docs/autonomous-r2-archive.md).
 
 For comparator containers, see the [image digests, licences, and corresponding source](comparators/IMAGES.md#licences-and-source).
 The Kraken and TrOCR images **contain non-open-source but redistributable components**.

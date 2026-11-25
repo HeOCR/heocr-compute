@@ -41,6 +41,7 @@ from .ssh import Remote, SSHError, public_key
 
 POD_PREFIX = "heocr-"
 HF_PROFILE_MARKER = "hf"
+ARCHIVE_PROFILE_MARKER = "archive"
 POD_IN, POD_OUT, POD_EXIT = "/heocr/in", "/heocr/out", "/heocr/exit_code"
 POD_DEADMAN = "/heocr/deadman.sh"
 POD_STARTED = "/heocr/job.started"
@@ -133,6 +134,7 @@ class Spec:
     prove_deadman: bool = False  # smoke only: fire the pod's switch at the end and check the pod is gone
     render_bundle: bool = False  # fixed render recipe only: bounded tar + its checksum manifest
     capacity_wait_hours: float | None = DEFAULT_CAPACITY_WAIT_HOURS
+    archive_credentials: Path | None = None  # optional run-scoped, autonomous R2 archive
 
 
 def new_run_id(now: dt.datetime) -> str:
@@ -268,7 +270,7 @@ def sweep(api, ledger: Ledger, *, everything: bool = False, dry_run: bool = Fals
         if everything:
             why = "--all"
         elif r is None:
-            if rid and name.startswith("heocr-hf-"):
+            if rid and name.startswith(("heocr-hf-", "heocr-archive-")):
                 # An autonomous pod can have been launched from another Mac.
                 continue
             why = "not in this machine's ledger"
@@ -301,7 +303,8 @@ def sweep(api, ledger: Ledger, *, everything: bool = False, dry_run: bool = Fals
             why = ("no verified worker receipt by its startup deadline" if state == "missing_receipt"
                    else "no container runtime by its startup deadline")
             startup_timeout = True
-        elif not res.get("autonomous") and res.get("host") == host and not pid_alive(res.get("pid", -1)):
+        elif (not res.get("autonomous") or (res.get("r2_archive") and "startup" not in r)) \
+                and res.get("host") == host and not pid_alive(res.get("pid", -1)):
             why = "its runner is gone"
         else:
             continue
@@ -389,7 +392,8 @@ class Runner:
                         raise Refused("CPU admission requires a verifiable RunPod pod identity")
                     listed[pid] = _cpu_pod_vcpus(pod)
                 continue
-            marker = HF_PROFILE_MARKER if reserve.get("autonomous") else reserve["profile"]
+            marker = (ARCHIVE_PROFILE_MARKER if reserve.get("r2_archive") else HF_PROFILE_MARKER
+                      if reserve.get("autonomous") else reserve["profile"])
             if pod_name(marker, run_id) not in names:
                 pending += count
 
@@ -464,8 +468,19 @@ class Runner:
         sweep(self.api, self.ledger, dry_run=spec.dry_run, out=self.out, sleep=self.sleep, now=self.now)
         entries, size = self.check_inputs(spec)
         self.out(f"inputs: {len(entries)} files, {size / (1 << 20):.1f} MB, hashes, open roots and local denylist checked")
+        archive = None
+        if spec.archive_credentials:
+            from .r2_archive import ArchiveStore
+
+            if spec.render_bundle or spec.prove_deadman or spec.pull_intermediate or spec.pulls != ("**",):
+                raise Refused("the archive return uses its own fixed output contract")
+            if not math.isfinite(spec.max_pull_gb) or not 0 < spec.max_pull_gb <= 2:
+                raise Refused("the archive return supports up to 2 GiB")
+            if not math.isfinite(spec.hours) or not PULL_RESERVE < spec.hours * 3600 <= 23 * 3600:
+                raise Refused("archive runs must leave at least ten minutes for R2 verification and fit within 23 hours")
+            archive = ArchiveStore(spec.archive_credentials, int(spec.max_pull_gb * (1 << 30)))
         run_id = new_run_id(self.now())
-        name = pod_name(spec.profile.name, run_id)
+        name = pod_name(ARCHIVE_PROFILE_MARKER if archive else spec.profile.name, run_id)
         with self.launch_slot(spec, run_id) as (q, waited):
             if q is None:
                 return {"run_id": run_id, "status": "declined"}
@@ -473,46 +488,61 @@ class Runner:
                 body = spec.profile.body(name, {"PUBLIC_KEY": "<heocr-remote ssh public key>"})
                 self.out("dry run: would create " + json.dumps(body))
                 self.out(f"dry run: would run under timeout {self._job_seconds(spec):.0f}s: {spec.cmd}")
+                if archive:
+                    self.out("dry run: would stage one autonomous R2 archive and a SHA-256 manifest")
                 return {"run_id": run_id, "status": "dry_run", "quote": q.__dict__}
             if waited:
                 manifest.verify_local(entries, spec.root, spec.policy or Policy.load())
-            guard_seconds = 0 if spec.render_bundle else DEADMAN_GRACE + budget.STARTUP_HOURS * 3600
+            archive_return = (archive.scope, archive.urls(run_id, math.ceil(spec.hours * 3600) + 900, self.now())) if archive else None
+            guard_seconds = 0 if spec.render_bundle or archive else DEADMAN_GRACE + budget.STARTUP_HOURS * 3600
             deadman = self.now() + dt.timedelta(hours=spec.hours, seconds=guard_seconds)
+            transport = {"autonomous": True, "r2_archive": archive.scope,
+                         "output": {"transport": "r2"}} if archive else {}
             self.ledger.reserve(run_id, profile=spec.profile.name, pod_type=spec.profile.pod_type,
                                 vcpus=spec.profile.vcpus, usd_est=q.usd_est, hours_max=q.hours,
-                                host=socket.gethostname(), deadman_utc=deadman.isoformat(timespec="seconds"))
-        return self._execute(spec, entries, run_id, name, q)
+                                host=socket.gethostname(), deadman_utc=deadman.isoformat(timespec="seconds"), **transport)
+        if archive_return is None:
+            return self._execute(spec, entries, run_id, name, q)
+        return self._execute(spec, entries, run_id, name, q, archive_return=archive_return)
 
     def _job_seconds(self, spec: Spec) -> float:
         return max(60.0, spec.hours * 3600 - PULL_RESERVE)
 
-    def _execute(self, spec, entries, run_id, name, q) -> dict:
+    def _execute(self, spec, entries, run_id, name, q, *, archive_return=None) -> dict:
         pod_id, rate, t_created, status, error, pulled = None, q.usd_per_hour, None, "error", None, []
         deadman = proof = None
         handlers = self._trap()
         caffeinate = self._keep_awake()
         t0 = self.clock()
         deadline = t0 + spec.hours * 3600
-        hard = deadline if spec.render_bundle else None
+        strict = spec.render_bundle or archive_return is not None
+        hard = deadline if strict else None
+        detached = False
         try:
             env = {"PUBLIC_KEY": public_key(), "HEOCR_RUN_ID": run_id}
             pod = self._create(spec.profile.body(name, env), name, hard)
             pod_id, t_created = pod["id"], self.clock()
             billed_rate = float(pod.get("cost") or 0)
-            if spec.render_bundle and (not math.isfinite(billed_rate) or billed_rate <= 0):
-                raise RunFailed("created render pod has no verifiable hourly price")
+            if strict and (not math.isfinite(billed_rate) or billed_rate <= 0):
+                raise RunFailed("created pod has no verifiable hourly price")
             billed_rate = billed_rate or q.compute_usd_per_hour
             rate = max(rate, billed_rate + budget.hourly(0, spec.profile.disk_gb))
             self.ledger.pod(run_id, pod_id=pod_id, usd_per_hr=billed_rate)
             self.out(f"pod {pod_id} created at ${billed_rate:.4f}/h")
-            if budget.overpriced(q, billed_rate) or (spec.render_bundle and billed_rate > q.compute_usd_per_hour):
+            if budget.overpriced(q, billed_rate) or (strict and billed_rate > q.compute_usd_per_hour):
                 raise RunFailed(f"pod billed ${billed_rate:.4f}/h, over the quote ${q.compute_usd_per_hour:.4f}/h")
             remote = self._wait_ready(pod_id, hard)
-            deadman = self._arm_deadman(remote, deadline, strict=spec.render_bundle)
-            if spec.render_bundle and deadman != "armed":
-                raise RunFailed("render requires an armed pod self-termination timer")
+            deadman = self._arm_deadman(remote, deadline, strict=strict)
+            if strict and deadman != "armed":
+                raise RunFailed("bounded return requires an armed pod self-termination timer")
             self._record_pod(remote, run_id, pod_id, spec.profile.pod_type, billed_rate, hard)
             self._upload(remote, spec, entries, hard)
+            if archive_return is not None:
+                self._launch_archive(remote, spec, run_id, pod_id, deadline, archive_return)
+                record_startup(self.ledger, run_id, pod_id, state="running")
+                detached = True
+                self.out("Archive supervisor confirmed. The pod verifies its R2 return and terminates itself.")
+                return {"run_id": run_id, "pod_id": pod_id, "status": "archive_running", "deadman": deadman}
             status = self._run_job(remote, spec, deadline)
             pulled = self._pull(remote, spec, run_id, hard, bundle=spec.render_bundle and status == "ok")
             if spec.render_bundle:
@@ -531,25 +561,26 @@ class Runner:
             error = f"{type(e).__name__}: {e}"
             self.out(f"error: {error}")
         finally:
-            self._terminating = True
-            gone = True
-            if pod_id is None:
-                try:
-                    pod_id = self._find_by_name(name, required=spec.render_bundle)
-                except RunFailed:
-                    gone = False  # a lost create response may conceal a billed pod
-            if pod_id:
-                gone = terminate_confirmed(self.api, pod_id, sleep=self.sleep)
-                self.out(f"pod {pod_id} terminated" if gone else
-                         f"POD {pod_id} IS STILL RUNNING: run `heocr-remote sweep`, or terminate it in the console")
-            if spec.render_bundle and not gone:
-                status, error = "error", "pod termination could not be confirmed"
-            secs = (self.clock() - t_created) if t_created is not None else 0.0
-            if gone:
-                usd = budget.billed(rate, secs) if pod_id else 0.0
-                self.ledger.final(run_id, pod_type=spec.profile.pod_type, hours=secs / 3600, usd=usd,
-                                  status=status, pod_id=pod_id, error=error, pulled=len(pulled),
-                                  deadman=deadman, self_removal=proof)
+            if not detached:
+                self._terminating = True
+                gone = True
+                if pod_id is None:
+                    try:
+                        pod_id = self._find_by_name(name, required=strict)
+                    except RunFailed:
+                        gone = False  # a lost create response may conceal a billed pod
+                if pod_id:
+                    gone = terminate_confirmed(self.api, pod_id, sleep=self.sleep)
+                    self.out(f"pod {pod_id} terminated" if gone else
+                             f"POD {pod_id} IS STILL RUNNING: run `heocr-remote sweep`, or terminate it in the console")
+                if strict and not gone:
+                    status, error = "error", "pod termination could not be confirmed"
+                secs = (self.clock() - t_created) if t_created is not None else 0.0
+                if gone:
+                    usd = budget.billed(rate, secs) if pod_id else 0.0
+                    self.ledger.final(run_id, pod_type=spec.profile.pod_type, hours=secs / 3600, usd=usd,
+                                      status=status, pod_id=pod_id, error=error, pulled=len(pulled),
+                                      deadman=deadman, self_removal=proof)
             self._untrap(handlers)
             if caffeinate:
                 caffeinate.terminate()
@@ -658,13 +689,7 @@ class Runner:
             raise RunFailed("inputs failed sha256 on the pod: " + (r.stdout + r.stderr).strip()[-300:])
         self.out(f"uploaded {len(entries)} files, sha256 verified on the pod")
 
-    def _run_job(self, remote, spec, deadline: float) -> str:
-        hard = deadline if spec.render_bundle else None
-        remaining = min(self._job_seconds(spec), deadline - self.clock() - PULL_RESERVE)
-        if spec.render_bundle and remaining < 1:
-            raise DeadlineExceeded("no render time left after setup and bundle pull allowance")
-        secs = int(max(1 if spec.render_bundle else 60, remaining))
-        inner = f"timeout --signal=TERM --kill-after=120 {secs} bash -lc {shlex.quote(spec.cmd)} > {POD_OUT}/job.log 2>&1; echo $? > {POD_EXIT}"
+    def _start_job(self, remote, inner, hard):
         # Idempotent: the marker is written once, before the job starts, so repeating the call after a
         # dropped connection never starts a second job.
         # The whole backgrounded group has its streams redirected, so nothing keeps the SSH channel open:
@@ -682,6 +707,49 @@ class Runner:
             self.sleep(_remaining(self.clock, hard, 10))
         else:
             raise RunFailed(f"the job could not be started over SSH in {START_TRIES} tries")
+
+    def _launch_archive(self, remote, spec, run_id, pod_id, deadline, transport):
+        scope, urls = transport
+        seconds = int(deadline - self.clock() - PULL_RESERVE)
+        if seconds < 1:
+            raise DeadlineExceeded("no time left after reserving the R2 verification allowance")
+        root = "/heocr/archive-supervisor"
+        package = f"{root}/heocr_compute/remote"
+        remote.run("python3 -c 'import hashlib; assert hasattr(hashlib, \"file_digest\")'"
+                   f" && command -v timeout >/dev/null && mkdir -p {package}",
+                   timeout=_remaining(self.clock, deadline, 60))
+        for module in ("r2_archive_worker.py", "r2_input.py"):
+            source = Path(__file__).with_name(module).read_text(encoding="utf-8")
+            remote.run(f"cat > {package}/{module}", input=source, timeout=_remaining(self.clock, deadline, 60))
+        settings = {"scope": scope, "urls": urls, "run_id": run_id, "pod_id": pod_id,
+                    "seconds": seconds, "cmd": spec.cmd}
+        try:
+            result = remote.run("umask 077; cat > /heocr/.archive-secret", input=json.dumps(settings),
+                                timeout=_remaining(self.clock, deadline, 60), check=False)
+        except SSHError:
+            raise RunFailed("could not transfer the pod-scoped archive secret") from None
+        if result.returncode:
+            raise RunFailed("could not transfer the pod-scoped archive secret")
+        self._start_job(remote, f"PYTHONPATH={root} python3 -m heocr_compute.remote.r2_archive_worker", deadline)
+        ready_by = min(deadline, self.clock() + 60)
+        while self.clock() < ready_by:
+            try:
+                result = remote.run("test -f /heocr/archive.ready", timeout=_remaining(self.clock, ready_by, 10), check=False)
+                if result.returncode == 0:
+                    return
+            except SSHError:
+                pass
+            self.sleep(_remaining(self.clock, ready_by, 2))
+        raise RunFailed("the autonomous archive supervisor did not acknowledge startup")
+
+    def _run_job(self, remote, spec, deadline: float) -> str:
+        hard = deadline if spec.render_bundle else None
+        remaining = min(self._job_seconds(spec), deadline - self.clock() - PULL_RESERVE)
+        if spec.render_bundle and remaining < 1:
+            raise DeadlineExceeded("no render time left after setup and bundle pull allowance")
+        secs = int(max(1 if spec.render_bundle else 60, remaining))
+        inner = f"timeout --signal=TERM --kill-after=120 {secs} bash -lc {shlex.quote(spec.cmd)} > {POD_OUT}/job.log 2>&1; echo $? > {POD_EXIT}"
+        self._start_job(remote, inner, hard)
         self.out(f"job started, limit {secs // 60} min")
         failures = 0
         while self.clock() < deadline:
