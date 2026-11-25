@@ -14,7 +14,7 @@ HARNESS = Path(__file__).resolve().parents[1] / "experiments/tableformer"
 sys.path.insert(0, str(HARNESS))
 try:
     from assets import BASE_SHA, CONFIG, CONFIG_SHA, MODEL_SUBDIR, WEIGHT, digest
-    from p3 import bbox_targets, capture_contract, checked_crop, checkpoint_diff
+    from p3 import bbox_targets, capture_contract, checked_crop, checkpoint_diff, check_schedule
     from p3_job import CODE, compile_job
     from train import load_manifest
 finally:
@@ -152,6 +152,26 @@ class P3Geometry(unittest.TestCase):
                 load_manifest(args(original))
             self.assertEqual(load_manifest(args(original, remote_transfer=True))[0][1],
                              ["fcel", "nl"])
+
+
+class P3Schedule(unittest.TestCase):
+    def test_uses_exact_weighted_fit_order_and_blocks_family_overlap(self):
+        examples = [
+            {"id": "p", "source_id": "phone-page", "carrier": "phone", "hard_family": ["matrix"]},
+            {"id": "s", "source_id": "scanner-page", "carrier": "scanner", "hard_family": []},
+            {"id": "n", "source_id": "native-page", "carrier": "native", "hard_family": []},
+            {"id": "v", "source_id": "validation-page", "carrier": "phone", "hard_family": []},
+        ]
+        order = {"fit_ids": ["p", "p", "s", "n"], "validation_ids": ["v"], "probe_ids": ["v"],
+                 "patience": 1, "carrier_steps": {"phone": 2, "scanner": 1, "native": 1}, "hard_steps": 2,
+                 "objective": "mean_token_ce_plus_2_bbox_smooth_l1_plus_0.1_class_kl"}
+        doc = {"examples": examples, "p3_schedule": order}
+        self.assertEqual(check_schedule(doc), ([0, 0, 1, 2], [3]))
+        with self.assertRaisesRegex(ValueError, "document-disjoint"):
+            check_schedule(doc | {"p3_schedule": order | {"probe_ids": ["p"]}})
+        examples[3]["source_id"] = "native-page"
+        with self.assertRaisesRegex(ValueError, "document-disjoint"):
+            check_schedule(doc)
 
 
 class P3Job(unittest.TestCase):
