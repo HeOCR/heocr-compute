@@ -91,3 +91,31 @@ ENV TOKENIZERS_PARALLELISM=false
 COPY comparators/trocr.py comparators/requirements-trocr-linux-amd64.txt ./
 RUN python -m pip install --only-binary=:all: --extra-index-url https://download.pytorch.org/whl/cpu \
     -r requirements-trocr-linux-amd64.txt && python -m pip check
+
+FROM pod-runtime AS tables-common
+RUN apt-get update && apt-get install -y --no-install-recommends libleptonica6 libgl1 libglib2.0-0t64 libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=tesseract-build /opt/tesseract/bin/tesseract /usr/local/bin/tesseract
+ADD --checksum=sha256:dbaa827aea6bc21215638447f17783a1004987c2d0bf5573d111fee397abdae5 \
+    https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/heb.traineddata /opt/tessdata/heb.traineddata
+COPY comparators/tables /opt/table-comparator
+ENV HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+RUN python -m venv /opt/tables
+ENTRYPOINT ["/bin/sh", "/opt/heocr-hf-entrypoint.sh"]
+
+FROM tables-common AS tables-paddle
+RUN /opt/tables/bin/pip install --only-binary=:all: --require-hashes -r /opt/table-comparator/requirements-paddle.txt \
+    && /opt/tables/bin/pip check \
+    && /opt/tables/bin/python /opt/table-comparator/fetch_models.py /opt/table-comparator/paddle-models.json /opt/models \
+    && echo paddle > /opt/table-comparator/lane
+
+FROM tables-common AS tables-tatr
+LABEL org.opencontainers.image.description="CPU Table Transformer comparator with its upstream MIT postprocessor and AGPL PyMuPDF dependency."
+ADD --checksum=sha256:c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383 \
+    https://raw.githubusercontent.com/microsoft/table-transformer/16d124f616109746b7785f03085100f1f6247575/LICENSE /usr/share/doc/heocr-comparator/TATR-LICENSE
+ADD --checksum=sha256:a7b3bdf0b0f9ea4b2ccd04bb0acca4bb05b1809d120edf556526a6d976d027db \
+    https://raw.githubusercontent.com/microsoft/table-transformer/16d124f616109746b7785f03085100f1f6247575/src/postprocess.py /opt/table-comparator/postprocess.py
+RUN /opt/tables/bin/pip install --only-binary=:all: --require-hashes --extra-index-url https://download.pytorch.org/whl/cpu \
+    -r /opt/table-comparator/requirements-tatr.txt && /opt/tables/bin/pip check \
+    && /opt/tables/bin/python /opt/table-comparator/fetch_models.py /opt/table-comparator/tatr-models.json /opt/models \
+    && echo tatr > /opt/table-comparator/lane
