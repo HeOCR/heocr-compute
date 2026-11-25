@@ -41,6 +41,8 @@ def load_manifest(args):
         from p3 import bbox_targets, capture_contract, checked_crop
 
         capture = capture_contract(manifest)
+        if capture.get("mode") == "direct_phone" and clean.get("remote_transfer") is not True:
+            raise ValueError("direct phone P3 requires exact TRAIN and remote-transfer approval")
     examples = manifest["examples"]
     if not examples or len({x["id"] for x in examples}) != len(examples):
         raise ValueError("TRAIN manifest must have unique fragment IDs")
