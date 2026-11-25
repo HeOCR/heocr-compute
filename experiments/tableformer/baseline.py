@@ -60,15 +60,20 @@ def image_pdf(raw):
     with Image.open(BytesIO(raw)) as image, pdfium.PdfDocument.new() as pdf:
         scale = 72 / image.info.get("dpi", (300, 300))[0]
         width, height = image.width * scale, image.height * scale
-        with pdf.new_page(width, height) as page, pdfium.PdfBitmap.from_pil(image.convert("RGB")) as bitmap:
+        page = pdf.new_page(width, height)
+        bitmap = pdfium.PdfBitmap.from_pil(image.convert("RGB"))
+        try:
             obj = pdfium.PdfImage.new(pdf)
             obj.set_bitmap(bitmap)
             obj.set_matrix(pdfium.PdfMatrix(width, 0, 0, height, 0, 0))
             page.insert_obj(obj)
             page.gen_content()
-        out = BytesIO()
-        pdf.save(out)
-        return out.getvalue()
+            out = BytesIO()
+            pdf.save(out)
+            return out.getvalue()
+        finally:
+            bitmap.close()
+            page.close()
 
 
 def docling_tables(docling_doc, rtl):

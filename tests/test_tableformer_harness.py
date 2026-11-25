@@ -1,4 +1,6 @@
 import hashlib
+from importlib.util import find_spec
+from io import BytesIO
 import json
 from pathlib import Path
 import sys
@@ -9,7 +11,7 @@ import unittest
 HARNESS = Path(__file__).resolve().parents[1] / "experiments/tableformer"
 sys.path.insert(0, str(HARNESS))
 try:
-    from baseline import docling_tables, read_asset, structure_only
+    from baseline import docling_tables, image_pdf, read_asset, structure_only
     from targets import otsl
     from train import load_manifest
 finally:
@@ -52,6 +54,22 @@ class Targets(unittest.TestCase):
         self.assertEqual(result["header_rows"], 1)
         self.assertEqual({(x["c"], x["colspan"]) for x in result["cells"]}, {(1, 2), (0, 1)})
         self.assertEqual(structure_only(gold())["cells"][0]["text"], "")
+
+
+    @unittest.skipUnless(find_spec("pypdfium2") and find_spec("PIL"), "requires the optional DEV runtime")
+    def test_raster_wrapper_round_trips_explicit_pixels(self):
+        import pypdfium2 as pdfium
+        from PIL import Image
+
+        image = Image.new("RGB", (12, 8), "white")
+        image.putpixel((5, 3), (23, 98, 177))
+        raw = BytesIO()
+        image.save(raw, "PNG", dpi=(72, 72))
+        with pdfium.PdfDocument(image_pdf(raw.getvalue())) as doc:
+            page = doc[0]
+            rendered = page.render().to_pil().convert("RGB")
+            self.assertEqual(rendered.size, image.size)
+            self.assertEqual(rendered.tobytes(), image.tobytes())
 
 
 class TrainIntake(unittest.TestCase):
