@@ -110,3 +110,5 @@ local calibration field witness check. Require increased filled-cell
 TEDS on the generated DEV set and zero lost calibration field witnesses
 before promoting a candidate. Keep authored DEV references, calibration
 sources and results out of training and the remote runtime.
+
+The [P3 recipe](P3.md) trains the structure and box decoders after phone rectification.
