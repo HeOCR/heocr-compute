@@ -20,8 +20,20 @@ def require_pins(values, fields):
 
 def capture_contract(manifest):
     capture = manifest.get("p3")
-    require_pins(capture, ("hdocsyngen_recipe_sha256", "rectifier_sha256", "rectifier_config_sha256",
-                           "rectifier_verdict_sha256"))
+    require_pins(capture, ("hdocsyngen_recipe_sha256",))
+    mode = capture.get("mode", "rectified_phone")
+    if mode == "direct_phone":
+        if any(key.startswith("rectif") for key in capture):
+            raise ValueError("direct phone capture contract includes rectification")
+        require_pins(capture, ("scanifier_fit_input_sha256", "scanifier_bank_sha256"))
+        if not isinstance(capture.get("phone_route_revision"), str) or not re.fullmatch(
+            r"[0-9a-f]{40}", capture["phone_route_revision"]
+        ):
+            raise ValueError("missing direct phone proposal route revision")
+    elif mode == "rectified_phone":
+        require_pins(capture, ("rectifier_sha256", "rectifier_config_sha256", "rectifier_verdict_sha256"))
+    else:
+        raise ValueError("unknown P3 phone capture route")
     fits = capture.get("scanifier_fit_sha256")
     if not isinstance(fits, list) or not fits or any(not isinstance(s, str) or not SHA.fullmatch(s) for s in fits):
         raise ValueError("missing pinned Scanifier phone fits")
@@ -30,26 +42,33 @@ def capture_contract(manifest):
 
 def checked_crop(item, capture, size):
     route = item.get("p3")
-    require_pins(route, ("source_page_sha256", "captured_page_sha256", "phone_fit_sha256",
-                         "rectified_page_sha256", "rectifier_sha256", "rectifier_config_sha256"))
-    if (
-        route.get("accepted") is not True
-        or route.get("phone_fit_sha256") not in capture["scanifier_fit_sha256"]
-        or any(route[key] != capture[key] for key in ("rectifier_sha256", "rectifier_config_sha256"))
-    ):
-        raise ValueError("P3 requires exactly the accepted phone rectifier route")
-    extent = route.get("rectified_size", [])
+    require_pins(route, ("source_page_sha256", "captured_page_sha256", "phone_fit_sha256"))
+    if route.get("accepted") is not True or route["phone_fit_sha256"] not in capture["scanifier_fit_sha256"]:
+        raise ValueError("P3 requires an accepted phone view from a pinned fit")
+    if capture.get("mode") == "direct_phone":
+        require_pins(route, ("phone_warp_sha256",))
+        if (route.get("mode") != "direct_phone" or any(key.startswith("rectif") for key in route)
+                or route.get("phone_route_revision") != capture["phone_route_revision"]):
+            raise ValueError("P3 requires the exact direct phone route")
+        extent = route.get("captured_size", [])
+    else:
+        fields = ("rectifier_sha256", "rectifier_config_sha256")
+        require_pins(route, (*fields, "rectified_page_sha256"))
+        if (route.get("mode", "rectified_phone") != "rectified_phone"
+                or any(route[key] != capture[key] for key in fields)):
+            raise ValueError("P3 requires exactly the accepted phone rectifier route")
+        extent = route.get("rectified_size", [])
     crop = route.get("crop_xyxy", [])
     if (
         not isinstance(extent, list) or len(extent) != 2
         or not isinstance(crop, list) or len(crop) != 4
         or any(type(n) is not int for n in (*crop, *extent))
     ):
-        raise ValueError("invalid P3 rectified table crop geometry")
+        raise ValueError("invalid P3 table crop geometry")
     left, top, right, bottom = crop
     if not (0 <= left < right <= extent[0] and 0 <= top < bottom <= extent[1]
             and size == (right - left, bottom - top)):
-        raise ValueError("P3 table crop disagrees with the rectified raster")
+        raise ValueError("P3 table crop disagrees with the declared raster")
 
 
 def cell_box(cell, size):
