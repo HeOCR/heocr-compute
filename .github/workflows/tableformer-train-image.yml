@@ -1,0 +1,57 @@
+name: Publish TableFormer CUDA training worker
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.repository == 'HeOCR/heocr-compute' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+    env:
+      IMAGE: ghcr.io/heocr/heocr-compute-train
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Prepare the committed build inputs
+        run: |
+          context="$RUNNER_TEMP/tableformer-image"
+          mkdir "$context"
+          git archive "$GITHUB_SHA" docker/tableformer-train.Dockerfile \
+            experiments/tableformer/requirements-train-linux.txt | tar -x -C "$context"
+          test -s "$context/experiments/tableformer/requirements-train-linux.txt"
+      - name: Authenticate to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Publish Linux AMD64 image
+        id: build
+        run: |
+          context="$RUNNER_TEMP/tableformer-image"
+          metadata="$RUNNER_TEMP/tableformer-image-metadata.json"
+          docker buildx build --platform linux/amd64 --file "$context/docker/tableformer-train.Dockerfile" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --tag "$IMAGE:tableformer-sha-$GITHUB_SHA" --provenance=false --sbom=false \
+            --metadata-file "$metadata" --push "$context"
+          digest="$(jq -er '."containerimage.digest"' "$metadata")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'image=%s@%s\n' "$IMAGE" "$digest" >> "$GITHUB_OUTPUT"
+          printf 'TableFormer training image: `%s@%s`\n' "$IMAGE" "$digest" >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify the worker pulls anonymously
+        env:
+          PUBLISHED_IMAGE: ${{ steps.build.outputs.image }}
+        run: |
+          config="$(mktemp -d)"
+          printf '{}\n' > "$config/config.json"
+          docker --config "$config" pull --platform linux/amd64 "$PUBLISHED_IMAGE"
