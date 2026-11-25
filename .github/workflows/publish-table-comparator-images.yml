@@ -28,7 +28,7 @@ jobs:
         lane: [paddle, tatr]
     env:
       LANE: ${{ matrix.lane }}
-      IMAGE: ghcr.io/heocr/heocr-compute-comparator-tables-${{ matrix.lane }}
+      IMAGE: ghcr.io/heocr/heocr-compute-train
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -57,7 +57,7 @@ jobs:
           GHCR_TOKEN: ${{ github.token }}
         run: |
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          tag="$IMAGE:sha-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          tag="$IMAGE:tables-$LANE-sha-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           docker tag "table-comparator:$LANE" "$tag"
           docker push "$tag"
           digest="$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')"
