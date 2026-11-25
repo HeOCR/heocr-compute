@@ -48,7 +48,8 @@ python compare.py --manifest "$DEV_MANIFEST" --manifest-sha256 "$DEV_SHA" \
 ```
 
 Both readers receive identical crop bytes. Kraken uses full-image line mode
-with RTL reordering. Stock Hebrew uses OEM 1 and PSM 13. The scorer preserves
+with RTL reordering and reuses one loaded model per group of up to 32 crops.
+Stock Hebrew uses OEM 1 and PSM 13. The scorer preserves
 literal characters under NFC and whitespace collapse, counts valid blank
 outputs as deletions and fails on reader errors. It writes per-line counts and
 a writer-cluster paired interval. `improved` requires a strictly negative

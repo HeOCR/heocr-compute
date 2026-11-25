@@ -78,34 +78,44 @@ def score(args):
     kraken = Path(sys.executable).with_name("kraken")
     env = os.environ | {"OMP_THREAD_LIMIT": "1", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
     root = args.manifest.parent.resolve()
-    rows, ids = [], set()
-    with tempfile.TemporaryDirectory(prefix="handwriting-dev-") as directory:
-        output = Path(directory) / "ocr.txt"
-        for line in manifest["rows"]:
-            key, group = line["id"], line["group"]
-            if not matches(ID, key) or key in ids or not matches(ID, group) or line.get("split") != "dev":
-                raise ValueError("invalid or duplicate DEV line")
-            ids.add(key)
-            image = (root / "lines" / f"{key}.png").resolve()
-            label = (root / "lines" / f"{key}.gt.txt").resolve()
-            if not image.is_relative_to(root) or not label.is_relative_to(root):
-                raise ValueError("DEV pair is outside the staged directory")
-            check(image, line["image_sha256"])
-            expected = normalize(check(label, line["label_sha256"]).read_text(encoding="utf-8"))
-            if not expected:
-                raise ValueError("empty DEV reference")
-            hypotheses = {"stock": read_output([str(tess), str(image), "stdout", "--tessdata-dir", str(args.tessdata),
-                                                 "-l", "heb", "--oem", "1", "--psm", "13"], env)}
-            for name, weights in readers.items():
-                read_output([str(kraken), "--device", "cpu", "--threads", "1", "--raise-on-error",
-                             "-i", str(image), str(output), "ocr", "--model", str(weights),
-                             "--num-line-workers", "0", "--no-segmentation", "--reorder", "--base-dir", "R"], env)
-                hypotheses[name] = output.read_text(encoding="utf-8")
-                output.unlink()
-            rows.append({"id": key, "group": group, "chars": len(expected),
-                         "edits": {name: distance(expected, normalize(text)) for name, text in hypotheses.items()}})
-    if not rows:
+    rows, cases, ids = [], [], set()
+    for line in manifest["rows"]:
+        key, group = line["id"], line["group"]
+        if not matches(ID, key) or key in ids or not matches(ID, group) or line.get("split") != "dev":
+            raise ValueError("invalid or duplicate DEV line")
+        ids.add(key)
+        image = (root / "lines" / f"{key}.png").resolve()
+        label = (root / "lines" / f"{key}.gt.txt").resolve()
+        if not image.is_relative_to(root) or not label.is_relative_to(root):
+            raise ValueError("DEV pair is outside the staged directory")
+        check(image, line["image_sha256"])
+        expected = normalize(check(label, line["label_sha256"]).read_text(encoding="utf-8"))
+        if not expected:
+            raise ValueError("empty DEV reference")
+        cases.append((key, group, image, expected))
+    if not cases:
         raise ValueError("DEV roster is empty")
+    with tempfile.TemporaryDirectory(prefix="handwriting-dev-") as directory:
+        for start in range(0, len(cases), 32):
+            batch = cases[start:start + 32]
+            predictions = {key: {} for key, _, _, _ in batch}
+            for name, weights in readers.items():
+                outputs = {}
+                command = [str(kraken), "--device", "cpu", "--threads", "1", "--raise-on-error"]
+                for index, (key, _, image, _) in enumerate(batch):
+                    output = Path(directory) / f"{start + index}-{name}.txt"
+                    command.extend(("-i", str(image), str(output)))
+                    outputs[key] = output
+                command.extend(("ocr", "--model", str(weights), "--num-line-workers", "0",
+                                "--no-segmentation", "--reorder", "--base-dir", "R"))
+                read_output(command, env)
+                for key, output in outputs.items():
+                    predictions[key][name] = output.read_text(encoding="utf-8")
+            for key, group, image, expected in batch:
+                predictions[key]["stock"] = read_output([str(tess), str(image), "stdout", "--tessdata-dir",
+                                                          str(args.tessdata), "-l", "heb", "--oem", "1", "--psm", "13"], env)
+                rows.append({"id": key, "group": group, "chars": len(expected),
+                             "edits": {name: distance(expected, normalize(text)) for name, text in predictions[key].items()}})
     return {"split": "dev", "manifest_sha256": args.manifest_sha256, "candidate_sha256": args.candidate_sha256,
             "stock_sha256": STOCK_SHA256, "tesseract_sha256": args.tesseract_sha256, "kraken": version("kraken"),
             "vs_stock": paired(rows, "stock"), **({"vs_starter": paired(rows, "starter")} if args.starter else {}),
