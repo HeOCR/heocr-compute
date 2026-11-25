@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import stat
 import urllib.error
 import urllib.request
 
@@ -48,7 +49,8 @@ def check_urls(job, run_id, raw, *, now=None, min_remaining=0):
     for name, url in urls.items():
         pin = {"account": job["output"]["account"], "path": object_key(run_id, name)}
         r2_input.check_url(pin, url, now=now, min_remaining=min_remaining,
-                           signed_headers=SIGNED_HEADERS, method="PUT")
+                           signed_headers=SIGNED_HEADERS, method="PUT",
+                           bucket=job["output"].get("bucket", r2_input.BUCKET))
     return urls
 
 
@@ -130,16 +132,50 @@ def cloudflare_token(expected_account):
     raise ValueError("could not verify the local Cloudflare token") from None
 
 
+def scoped_credentials(account, bucket):
+    """Load a dedicated account- and bucket-bound S3 credential from the operator's machine."""
+    path = Path.home() / ".config/heocr/r2-output.env"
+    try:
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), encoding="utf-8") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+                raise ValueError
+            config = {}
+            for line in stream:
+                fields = shlex.split(line, comments=True)
+                if fields[:1] == ["export"]:
+                    fields = fields[1:]
+                if not fields:
+                    continue
+                if len(fields) != 1 or "=" not in fields[0]:
+                    raise ValueError
+                key, value = fields[0].split("=", 1)
+                if key in config:
+                    raise ValueError
+                config[key] = value
+        key = config["R2_ACCESS_KEY_ID"]
+        secret = config["R2_SECRET_ACCESS_KEY"]
+        if (config["R2_ACCOUNT_ID"] != account or config["R2_BUCKET"] != bucket
+                or not hf_job.matches(hf_job.R2_ACCOUNT, key) or not hf_job.matches(hf_job.SHA, secret)):
+            raise ValueError
+        return key, secret
+    except (KeyError, OSError, ValueError):
+        raise ValueError("expected a matching bucket-scoped R2 credential in the mode-600 output credential file") from None
+
+
 class LocalR2:
     """Sign upload URLs and read exact objects on the operator's machine."""
 
-    def __init__(self, account):
+    def __init__(self, account, *, bucket=None):
+        hf_job.require(hf_job.matches(hf_job.R2_ACCOUNT, account), "invalid R2 account")
+        hf_job.require(bucket is None or hf_job.matches(hf_job.R2_BUCKET, bucket), "invalid R2 output bucket")
+        self.bucket = r2_input.BUCKET if bucket is None else bucket
         try:
             import boto3
             from botocore.config import Config
         except ImportError:
             raise ValueError("install the local R2 client with pip install '.[r2]'") from None
-        key, secret = cloudflare_token(account)
+        key, secret = cloudflare_token(account) if bucket is None else scoped_credentials(account, bucket)
         try:
             self.client = boto3.client(
                 "s3", endpoint_url=f"https://{account}.r2.cloudflarestorage.com", region_name="auto",
@@ -153,9 +189,10 @@ class LocalR2:
             raise ValueError("could not initialize the local R2 client") from None
 
     def put_urls(self, job, run_id, *, now, min_remaining):
+        hf_job.require(self.bucket == job["output"].get("bucket", r2_input.BUCKET), "R2 output bucket differs")
         try:
             urls = {name: self.client.generate_presigned_url(
-                "put_object", Params={"Bucket": r2_input.BUCKET, "Key": object_key(run_id, name),
+                "put_object", Params={"Bucket": self.bucket, "Key": object_key(run_id, name),
                                       "ContentType": HEADERS["Content-Type"], "IfNoneMatch": "*"},
                 ExpiresIn=r2_input.MAX_LIFETIME, HttpMethod="PUT",
             ) for name in object_names(job)}
@@ -169,7 +206,7 @@ class LocalR2:
         from botocore.exceptions import ClientError
 
         try:
-            response = self.client.get_object(Bucket=r2_input.BUCKET, Key=object_key(run_id, name))
+            response = self.client.get_object(Bucket=self.bucket, Key=object_key(run_id, name))
         except ClientError as exc:
             if missing_ok and exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
                 return None

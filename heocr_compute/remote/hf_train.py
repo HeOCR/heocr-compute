@@ -32,9 +32,13 @@ def check_hub_inputs(job):
             policy.check_hash(path, item["sha256"])
 
 
+def output_client(output):
+    return r2_output.LocalR2(output["account"], bucket=output.get("bucket"))
+
+
 def read_worker_startup(token, run_id, pod_id, reserve, *, r2=None):
     if hf_job.is_r2_output(reserve):
-        r2 = r2 if r2 is not None else r2_output.LocalR2(reserve["output"]["account"])
+        r2 = r2 if r2 is not None else output_client(reserve["output"])
         with tempfile.TemporaryDirectory(prefix="heocr-r2-startup-") as cache:
             receipt, _ = read_r2_receipt(r2, run_id, reserve, Path(cache), startup_only=True)
         if receipt is None:
@@ -147,7 +151,7 @@ def launch(a, profile, api, ledger):
     runner = Runner(api, ledger)
     require_worker_receipt = getattr(a, "require_worker_receipt", False)
     startup_token = None
-    r2 = r2_output.LocalR2(job["output"]["account"]) if r2_enabled else None
+    r2 = output_client(job["output"]) if r2_enabled else None
     if require_worker_receipt and r2 is None:
         hf_job.require(repo_scope is not None, "worker receipt verification requires --hf-repo-scope")
         hf_job.require("telemetry" in job, "worker receipt verification requires the telemetry job schema")
@@ -362,7 +366,7 @@ def collect(a, api, ledger):
         prefix = f"runs/{run_id}"
         r2 = None
         if hf_job.is_r2_output(reserve):
-            r2 = r2_output.LocalR2(output["account"])
+            r2 = output_client(output)
             receipt, revision = read_r2_receipt(r2, run_id, reserve, root)
         else:
             try:

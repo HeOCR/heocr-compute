@@ -18,6 +18,7 @@ HUB = "https://huggingface.co"
 SHA = re.compile(r"[0-9a-f]{64}")
 REVISION = re.compile(r"[0-9a-f]{40}")
 R2_ACCOUNT = re.compile(r"[0-9a-f]{32}")
+R2_BUCKET = re.compile(r"[a-z0-9][a-z0-9-]{1,61}[a-z0-9]")
 REPO = re.compile(r"HeOCR/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}")
 RUN_ID = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{4}")
 POD_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
@@ -110,9 +111,12 @@ def parse(raw, approved):
         require(all(size_ok(limit) for limit in job["telemetry"].values()), "invalid telemetry size limit")
     require(matches(IMAGE, job["image"]), "expected a digest-pinned worker image")
     if is_r2_output(job):
-        fields(job["output"], "transport account")
-        require(telemetry_enabled and matches(R2_ACCOUNT, job["output"]["account"]),
+        output = job["output"]
+        fields(output, "transport account" + (" bucket" if "bucket" in output else ""))
+        require(telemetry_enabled and matches(R2_ACCOUNT, output["account"]),
                 "R2 output requires a telemetry job and exact account")
+        if "bucket" in output:
+            require(matches(R2_BUCKET, output["bucket"]), "invalid R2 output bucket")
     else:
         fields(job["output"], "repo type")
         location(job["output"])

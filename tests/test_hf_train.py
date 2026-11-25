@@ -146,6 +146,31 @@ class HfTrainTest(unittest.TestCase):
         for surface in (stdout.getvalue(), self.ledger.path.read_text(), self.jobfile.read_text()):
             self.assertNotIn(envelope, surface)
 
+    def test_named_r2_output_is_bound_before_create_and_on_readback(self):
+        self.set_r2_output()
+        bucket = "invented-output"
+        self.job["output"]["bucket"] = bucket
+        self.write_job()
+        with (patch.object(Policy, "load", return_value=Policy()),
+              patch.object(r2_output, "LocalR2") as local,
+              contextlib.redirect_stdout(io.StringIO())):
+            self.args.dry_run = True
+            self.assertEqual(hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger), 0)
+            local.assert_called_once_with(self.job["output"]["account"], bucket=bucket)
+            self.api.create_pod.assert_not_called()
+            local.reset_mock()
+            with patch.object(hf_train, "read_r2_receipt", return_value=(None, None)):
+                self.assertIsNone(hf_train.read_worker_startup(None, "invented-run", "invented-pod", self.job))
+            local.assert_called_once_with(self.job["output"]["account"], bucket=bucket)
+
+    def test_job_rejects_invalid_named_r2_bucket(self):
+        self.set_r2_output()
+        for candidate in ("../escape", "https://elsewhere", "a", "Uppercase", "-edge", None):
+            self.job["output"]["bucket"] = candidate
+            self.write_job()
+            with self.assertRaisesRegex(ValueError, "invalid R2 output bucket"):
+                hf_job.parse(self.jobfile.read_bytes(), self.args.approved_sha256)
+
     def test_r2_worker_keeps_logs_after_checkpoint_put_failure(self):
         self.set_r2_output()
         self.source.write_text(

@@ -59,12 +59,20 @@ job SHA-256. Use a worker image built with this support and add
 private Hub read credential still work the same way. The worker writes run
 receipts, declared checkpoints, metrics and logs to private R2.
 
-Install `heocr-compute[r2]` on the launching and collecting machine. The local
-signer reads the account ID and Cloudflare API token from the existing
-mode-600 Cloudflare credential file and verifies the token. After capacity
-admission, it signs an exact PUT for each declared object. The URLs expire
-within 24 hours and go only into the pod supervisor's secret environment.
-Neither the SDK nor the long-lived local R2 credential is needed on the pod.
+Install `heocr-compute[r2]` on the launching and collecting machine. For a
+dedicated output bucket, add `"bucket":"<bucket-name>"` to the approved
+`output` object. Configure an R2 Object Read & Write credential scoped to
+that single bucket. In the operator's mode-600 `r2-output.env` credential
+file, set `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_ACCESS_KEY_ID` and
+`R2_SECRET_ACCESS_KEY`. The account and bucket must both match the job and
+are carried through startup verification and collection. Verify the
+bucket's public access settings and test an authenticated write and
+size/SHA-256 readback before using it. Legacy output objects without a
+bucket use the existing Cloudflare credential file.
+
+After capacity admission, the signer creates an exact PUT for each declared
+object. The URLs expire within 24 hours and go only into the pod supervisor's
+secret environment. The local credential stays on the operator's machine.
 The dry run checks signing and job admission without creating an object or pod.
 [Cloudflare R2 presigned URLs](https://developers.cloudflare.com/r2/api/s3/presigned-urls/)
 
@@ -75,7 +83,10 @@ launcher checks the startup receipt against its reservation. After teardown,
 `heocr-remote collect-hf RUN_ID` checks the terminal receipt, or recovers the
 last complete checkpoint if the terminal receipt is absent. It verifies
 each file's size and SHA-256 before exposing local results. A PUT that returns
-an ambiguous result does not count as a confirmed upload.
+an ambiguous result does not count as a confirmed upload. Keep the raw
+snapshots available through model selection. After independent readback,
+retain the selected checkpoints, final artifacts and their manifest. Prune
+only the other exact run-owned object keys after the selection is recorded.
 [Cloudflare R2 conditional writes](https://developers.cloudflare.com/r2/api/s3/conditional-operations/)
 
 ## Worker and launch
