@@ -53,18 +53,26 @@ def predictor(models, read_cell):
             predictions = objects(structure, crop)
             names = structure[0].config.id2label
             threshold = {name: THRESHOLD for name in names.values()}
-            root = {"bbox": [0, 0, crop.width, crop.height], "page_num": page}
-            grid, found, _ = postprocess.objects_to_cells(root, predictions, [], names, threshold)
-            if not found:
+            regions = [obj for obj in predictions if names[obj["label"]] == "table"]
+            if not regions:
                 issues.append("detection_without_structure")
-                continue
-            cells = [Cell(min(cell["row_nums"]), min(cell["column_nums"]),
-                          len(cell["row_nums"]), len(cell["column_nums"]), cell["header"],
-                          read_cell(crop, cell["bbox"])) for cell in found]
-            try:
-                tables.append(table(cells, len(grid["rows"]), len(grid["columns"]), page, bbox))
-            except ValueError:
-                issues.append("invalid_predicted_grid")
+            for region in regions:
+                # Microsoft assigns structural objects to a table at intersection/
+                # object area >= 0.5, before aligning row and column bands.
+                related = [dict(obj, bbox=list(obj["bbox"])) for obj in predictions
+                           if postprocess.iob(obj["bbox"], region["bbox"]) >= 0.5]
+                grid, found, _ = postprocess.objects_to_cells(
+                    dict(region, page_num=page), related, [], names, threshold)
+                if not found:
+                    issues.append("detection_without_structure")
+                    continue
+                cells = [Cell(min(cell["row_nums"]), min(cell["column_nums"]),
+                              len(cell["row_nums"]), len(cell["column_nums"]), cell["header"],
+                              read_cell(crop, cell["bbox"])) for cell in found]
+                try:
+                    tables.append(table(cells, len(grid["rows"]), len(grid["columns"]), page, bbox))
+                except ValueError:
+                    issues.append("invalid_predicted_grid")
         return tables, issues
 
     return predict
