@@ -105,25 +105,33 @@ def prepare(manifest_path, archive_path, destination, *, local=False):
     return {role: len(paths) for role, paths in lists.items()}
 
 
-def run(root, *, local=False):
+def run(root, *, local=False, device="cpu", starter_name="starter.safetensors", starter_sha=STARTER_SHA256):
     if version("kraken") != "7.2":
         raise RuntimeError("the pilot requires Kraken 7.2")
     inputs = root / "in"
-    starter = inputs / "starter.safetensors"
-    if digest(starter) != STARTER_SHA256:
+    if starter_name not in ("starter.safetensors", "starter.mlmodel") or not matches(SHA256, starter_sha):
+        raise ValueError("invalid starter checkpoint pin")
+    starter = inputs / starter_name
+    if digest(starter) != starter_sha:
         raise ValueError("unexpected starter checkpoint")
+    env = os.environ.copy()
+    if device == "cuda:0":
+        import torch
+        if not torch.cuda.is_available():
+            raise RuntimeError("the requested CUDA device is unavailable")
+        env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     with tempfile.TemporaryDirectory(prefix="handwriting-pilot-", dir=root) as scratch:
         work = Path(scratch)
         counts = prepare(inputs / "manifest.json", inputs / "lines.tar", work, local=local)
         print(f"TRAIN fit {counts['fit']}, TRAIN monitor {counts['monitor']}", flush=True)
-        cmd = [str(Path(sys.executable).with_name("ketos")), "--device", "cpu", "--seed", "20261125",
-               "--deterministic", "--workers", "0", "--threads", "8", "train", "--arch", "ppocrv6",
+        cmd = [str(Path(sys.executable).with_name("ketos")), "--device", device, "--seed", "20261125",
+               "--deterministic", "--workers", "0", "--threads", "8", "train",
                "--load", str(starter), "--resize", "union", "--format-type", "path",
                "--training-data", "fit.lst", "--evaluation-data", "monitor.lst", "--normalization", "NFD",
                "--normalize-whitespace", "--reorder", "--base-dir", "R", "--batch-size", "8",
                "--optimizer", "AdamW", "--schedule", "constant", "--lrate", "0.0001", "--quit", "fixed", "--epochs", "3",
                "--output", "checkpoints", "--weights-format", "safetensors"]
-        subprocess.run(cmd, check=True, cwd=work)
+        subprocess.run(cmd, check=True, cwd=work, env=env)
         best = list((work / "checkpoints").glob("best_*.safetensors"))
         if len(best) != 1 or best[0].stat().st_size == 0:
             raise RuntimeError("expected one nonempty TRAIN-monitor checkpoint")
@@ -140,6 +148,12 @@ def run(root, *, local=False):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--local", action="store_true", help="Use a Mac-local TRAIN handoff")
-    run(Path.cwd(), local=parser.parse_args().local)
+    parser.add_argument("--device", choices=("cpu", "cuda:0"), default="cpu")
+    parser.add_argument("--starter-name", choices=("starter.safetensors", "starter.mlmodel"),
+                        default="starter.safetensors")
+    parser.add_argument("--starter-sha256", default=STARTER_SHA256)
+    args = parser.parse_args()
+    run(Path.cwd(), local=args.local, device=args.device,
+        starter_name=args.starter_name, starter_sha=args.starter_sha256)

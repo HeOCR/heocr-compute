@@ -8,9 +8,18 @@ on:
       - 'docker/build-kraken-train-image.sh'
       - 'docker/comparators/**'
       - 'docker/hf-train-entrypoint.sh'
+      - 'experiments/tableformer/requirements-train-linux.txt'
       - 'heocr_compute/**'
       - 'pyproject.toml'
   workflow_dispatch:
+    inputs:
+      target:
+        type: choice
+        description: Kraken training image variant
+        default: kraken-train
+        options:
+          - kraken-train
+          - kraken-train-cuda
 
 permissions:
   contents: read
@@ -20,11 +29,16 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      matrix:
+        target: [kraken-train, kraken-train-cuda]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - run: bash docker/build-kraken-train-image.sh kraken-train:ci
+      - run: bash docker/build-kraken-train-image.sh kraken-train:ci "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
 
   publish:
     if: github.repository == 'HeOCR/heocr-compute' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
@@ -34,17 +48,18 @@ jobs:
       contents: read
       packages: write
     env:
-      IMAGE: ghcr.io/heocr/heocr-compute-kraken-train
+      TARGET: ${{ inputs.target }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: Build and check
-        run: bash docker/build-kraken-train-image.sh kraken-train:ci
+        run: bash docker/build-kraken-train-image.sh kraken-train:ci "$TARGET"
       - name: Publish checked image and verify its digest
         env:
           GHCR_TOKEN: ${{ github.token }}
         run: |
+          IMAGE="ghcr.io/heocr/heocr-compute-$TARGET"
           printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           tag="$IMAGE:sha-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           docker tag kraken-train:ci "$tag"
