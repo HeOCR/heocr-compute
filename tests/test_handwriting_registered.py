@@ -26,6 +26,8 @@ def load_script(name):
 with patch.dict(sys.modules, {"train": load_script("train")}):
     compare = load_script("compare")
     local_batch = load_script("local_batch")
+    with patch.dict(sys.modules, {"local_batch": local_batch}):
+        compose_local = load_script("compose_local")
 
 
 def pin(body):
@@ -163,3 +165,71 @@ class RegisteredHandwritingTest(unittest.TestCase):
         fresh = {"sources": [], "rows": []}
         with self.assertRaisesRegex(ValueError, "roster or archive"):
             local_batch.append_batch(output, fresh, receipt, put(receipt, value | {"rows_sha256": "0" * 64}))
+
+    def test_compose_pinned_index_preserves_tags_and_publishes_all_or_nothing(self):
+        base = self.root / "base"
+        base.mkdir()
+        indexed = self.root / "approved"
+        indexed.mkdir()
+        unindexed = self.root / "unindexed"
+        unindexed.mkdir()
+        (unindexed / "clean.json").write_text("Unread", encoding="utf-8")
+        label = b"invented label\n"
+
+        def make_archive(directory, names):
+            with tarfile.open(directory / "lines.tar", "w") as archive:
+                for name, image in names.items():
+                    for suffix, body in ((".png", image), (".gt.txt", label)):
+                        item = tarfile.TarInfo(f"lines/{name}{suffix}")
+                        item.size = len(body)
+                        archive.addfile(item, io.BytesIO(body))
+            return compare.digest(directory / "lines.tar")
+
+        base_archive = make_archive(base, {"a": b"fit", "b": b"monitor"})
+        base_sha = put(base / "manifest.json", {
+            "schema": "heocr.handwriting_train.v1", "split": "train", "archive_sha256": base_archive,
+            "sources": [{"id": "base", "clean_sha256": "a" * 64, "runpod_allowed": False, "partner": False}],
+            "rows": [{"id": key, "group": f"group-{role}", "role": role, "split": "train", "source": "base",
+                      "image_sha256": pin(role.encode()), "label_sha256": pin(label)}
+                     for key, role in (("a", "fit"), ("b", "monitor"))],
+        })
+        archive_sha = make_archive(indexed, {"c": b"indexed"})
+        rows = indexed / "rows.jsonl"
+        rows.write_text(json.dumps({"id": "c", "group": "writer", "role": "fit", "split": "train",
+                                   "image_sha256": pin(b"indexed"), "label_sha256": pin(label),
+                                   "tags": ["label_unreviewed"]}) + "\n", encoding="utf-8")
+        receipt = {"schema": "heocr.handwriting_train_batch.v1", "split": "train", "batch": "approved",
+                   "verdict": "TRAIN CLEAN", "runpod_allowed": False, "partner": False,
+                   "rows_sha256": compare.digest(rows), "archive_sha256": archive_sha}
+        clean = indexed / "clean.json"
+        index = self.root / "index.json"
+
+        def stage_index(approved):
+            return put(index, {"schema": "heocr.handwriting_train_index.v1", "split": "train", "batches": [
+                {"id": "approved", "clean_sha256": put(clean, approved)},
+            ]})
+
+        output = self.root / "out"
+        stage_index(receipt)
+        with self.assertRaisesRegex(ValueError, "index SHA-256"):
+            compose_local.compose(base, base_sha, index, "f" * 64, output)
+        with self.assertRaisesRegex(ValueError, "distinct, Mac-only"):
+            compose_local.compose(base, base_sha, index, stage_index(receipt | {"batch": "unindexed"}), output)
+        self.assertFalse(output.exists())
+        index_sha = stage_index(receipt)
+        pins = compose_local.compose(base, base_sha, index, index_sha, output)
+        manifest = json.loads((output / "manifest.json").read_bytes())
+        self.assertEqual(pins["indexed_batches"], 1)
+        self.assertEqual(pins["train_pairs"], 3)
+        self.assertEqual(manifest["local_train_index_sha256"], index_sha)
+        self.assertEqual(manifest["rows"][-1]["tags"], ["label_unreviewed"])
+        self.assertEqual(compare.digest(base / "lines.tar"), base_archive)
+        with tarfile.open(output / "lines.tar") as archive:
+            self.assertEqual(archive.extractfile("lines/approved-c.gt.txt").read(), label)
+        symlinked = self.root / "symlinked"
+        symlinked.symlink_to(indexed, target_is_directory=True)
+        bad_index_sha = put(index, {"schema": "heocr.handwriting_train_index.v1", "split": "train", "batches": [
+            {"id": "symlinked", "clean_sha256": compare.digest(clean)},
+        ]})
+        with self.assertRaisesRegex(ValueError, "within its named directory"):
+            local_batch.index_batches(index, bad_index_sha)

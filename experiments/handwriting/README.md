@@ -47,6 +47,28 @@ across batches. Staging checks both signed files and every member, joins the
 batches in command-line order and refuses a writer or image across both roles.
 Only the separately supplied TRAIN batch receipts enter this command.
 
+For routine intake, have the CLEAN publisher hand off a pinned local index
+and call `compose_local.py` from its batch-release step. This reuses the
+existing base TRAIN pair bundle, so adding a batch does not rerender earlier
+crops. Use a fresh output directory for each index. The new manifest binds
+both the base and index hashes, preserves row tags including
+`label_unreviewed`, and keeps Mac-only restrictions. `local-train.json` uses
+`schema: "heocr.handwriting_train_index.v1"`, `split: "train"` and `batches`
+with one `id` and `clean_sha256` per approved batch. Each batch supplies
+`<id>/clean.json`, `<id>/rows.jsonl` and `<id>/lines.tar` alongside the index.
+The receipt's `batch` must match its indexed `id`. The index digest comes
+from the same trusted release handoff as the receipts.
+
+```sh
+python compose_local.py --base "$BASE_DIR" --base-sha256 "$BASE_MANIFEST_SHA" \
+  --index "$CLEAN_INDEX" --index-sha256 "$CLEAN_INDEX_SHA" --output "$STAGED_IN"
+```
+
+The composer processes only indexed CLEAN batches and publishes the new
+bundle after all batches validate. The staging step does not launch training.
+Use the Mac-local trainer for the composed bundle after binding the exact
+input manifest and archive to the intended run.
+
 ## Common staging format and cloud lane
 
 The data handoff uses `heocr.handwriting_train.v1` with `split: "train"` and
