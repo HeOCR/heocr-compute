@@ -133,7 +133,8 @@ def launch(a, profile, api, ledger):
     registry = getattr(a, "registry_auth_id", None)
     hf_job.require(registry is None or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", registry) is not None,
                    "supply a Runpod managed registry credential ID")
-    hf_job.require(all(math.isfinite(x) and x > 0 for x in (a.hours, a.run_cap, a.month_cap)),
+    caps = (a.run_cap,) if a.month_cap is None else (a.run_cap, a.month_cap)
+    hf_job.require(all(math.isfinite(x) and x > 0 for x in (a.hours, *caps)),
                    "training time and cost caps must be finite and positive")
     startup_limit = budget.STARTUP_HOURS * 60
     startup_minutes = getattr(a, "startup_minutes", startup_limit)

@@ -44,8 +44,8 @@ def settings(a) -> dict:
         raise ValueError(f"render --hours must be between 0.25 and {MAX_HOURS:g}")
     if not math.isfinite(a.run_cap) or not 0 < a.run_cap <= MAX_COST:
         raise ValueError(f"render --run-cap must be positive and at most ${MAX_COST:.2f}")
-    if not math.isfinite(a.month_cap) or not 0 < a.month_cap <= budget.MONTH_CAP_USD:
-        raise ValueError("render --month-cap must be positive and at most the runner monthly cap")
+    if a.month_cap is not None and (not math.isfinite(a.month_cap) or a.month_cap <= 0):
+        raise ValueError("render --month-cap must be positive and finite")
     if not COMMIT.fullmatch(a.code_revision) or not DIGEST.fullmatch(a.font_manifest_sha256):
         raise ValueError("render requires a full Git commit and font manifest SHA-256")
     fonts = a.font or [DEFAULT_FONT]

@@ -14,10 +14,11 @@ progress, or one whose runner died before finishing). So a crash can only overst
 understate it. ``sweep`` writes the missing ``final`` when it terminates an orphaned pod.
 
 Every event carries the RunPod account it ran on (``account``, the label from the account file). The
-month's total, and so the monthly cap, counts only the current account's runs. Runs on other accounts,
+month's total counts only the current account's runs. Runs on other accounts,
 or from before accounts were tagged, stay in the file as history and are reported apart.
 
-Reserving takes an exclusive lock on the ledger, so two runners cannot both pass the monthly cap check.
+Reserving takes an exclusive lock on the ledger, so simultaneous dispatches account for each
+other's open reservations.
 """
 from __future__ import annotations
 
@@ -128,6 +129,11 @@ class Ledger:
         return {"month": month, "account": self.account, "spent": round(spent, 4),
                 "open_estimate": round(open_est, 4), "total": round(spent + open_est, 4),
                 "finals": finals, "open": open_runs, "other_spent": round(other, 4), "others": others}
+
+    def open_reservations_usd(self) -> float:
+        """Worst-case reservations for this account that have yet to be reconciled, across months."""
+        return round(sum(float(run["reserve"]["usd_est"]) for run in self.runs().values()
+                         if "reserve" in run and "final" not in run and self._counts(run)), 4)
 
     def waiting(self) -> list[dict]:
         """Current capacity waiters for this account, independent of the spend month."""

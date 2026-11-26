@@ -18,4 +18,4 @@
   denylist. The machine-specific files (`~/.config/heocr/remote_open_roots.toml`,
   `~/.config/heocr/remote_denylist.txt`) are never committed. Tests use invented paths only.
 - Run state (the spend ledger, results) lives outside the repository.
-- The monthly cap in `budget.py` is the project's budget; changing it needs maintainer approval.
+- Changing the account-balance reserve in `budget.py` needs maintainer approval.

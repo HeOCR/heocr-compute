@@ -1,15 +1,14 @@
 """The money rules, checked before any pod exists.
 
-A run is refused when its worst-case cost (live hourly price x its wall-time limit, plus start-up and
-disk) is above the per-run cap, would push the month over the monthly cap, or is more than the account
-balance. The monthly cap is the project's budget (set 2026-11-18, $150): a flag can lower it, never raise it.
+A run must fit the per-run cap and leave the account reserve in the live balance after existing
+reservations and the new worst-case cost. An operator can also set a monthly cap.
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
 
-MONTH_CAP_USD = 150.0        # the project's budget, 2026-11-18. Raising it means changing this line, in review.
+BALANCE_RESERVE_USD = 20.0
 RUN_CAP_USD = 25.0           # default per-run cap; --run-cap changes it
 STARTUP_HOURS = 0.25         # image pull, setup and transfers before the wall-time clock starts counting
 DISK_USD_PER_GB_HOUR = 0.0002  # container disk while running (about $0.10-0.14 per GB-month), rounded up
@@ -29,16 +28,19 @@ class Quote:
     balance: float
     month_spent: float       # month to date, open reservations included
     run_cap: float
-    month_cap: float
+    month_cap: float | None
+    open_reservations: float
 
     def lines(self) -> list[str]:
+        monthly_limit = f" of ${self.month_cap:.2f}" if self.month_cap is not None else ""
         return [
             f"price         ${self.usd_per_hour:.4f}/h (live, compute + disk)",
             f"worst case    ${self.usd_est:.2f} for {self.hours:.2f} h (wall-time limit + start-up)",
             f"per-run cap   ${self.run_cap:.2f}",
-            f"month so far  ${self.month_spent:.2f} of ${self.month_cap:.2f}"
+            f"month so far  ${self.month_spent:.2f}{monthly_limit}"
             f" (after this run, at worst ${self.month_spent + self.usd_est:.2f})",
-            f"balance       ${self.balance:.2f}",
+            f"balance       ${self.balance:.2f} (open reservations ${self.open_reservations:.2f},"
+            f" reserve ${BALANCE_RESERVE_USD:.2f})",
         ]
 
 
@@ -47,9 +49,16 @@ def hourly(compute_usd_per_hour: float, disk_gb: int) -> float:
 
 
 def quote(*, compute_usd_per_hour: float, disk_gb: int, wall_hours: float, balance: float,
-          month_spent: float, run_cap: float = RUN_CAP_USD, month_cap: float = MONTH_CAP_USD) -> Quote:
-    if month_cap > MONTH_CAP_USD:
-        raise BudgetRefused(f"the monthly cap is ${MONTH_CAP_USD:.0f}; a flag can lower it, not raise it")
+          month_spent: float, open_reservations: float = 0.0, run_cap: float = RUN_CAP_USD,
+          month_cap: float | None = None) -> Quote:
+    if month_cap is not None and (not math.isfinite(month_cap) or month_cap <= 0):
+        raise BudgetRefused("the optional monthly cap must be positive and finite")
+    if not math.isfinite(run_cap) or run_cap <= 0:
+        raise BudgetRefused("the per-run cap must be positive and finite")
+    if not math.isfinite(balance) or balance < 0:
+        raise BudgetRefused("no verifiable account balance")
+    if not math.isfinite(open_reservations) or open_reservations < 0:
+        raise BudgetRefused("no verifiable total for open reservations")
     if wall_hours <= 0 or not math.isfinite(wall_hours):
         raise BudgetRefused("the wall-time limit must be a positive number of hours")
     if compute_usd_per_hour <= 0:
@@ -57,18 +66,21 @@ def quote(*, compute_usd_per_hour: float, disk_gb: int, wall_hours: float, balan
     per_hour = hourly(compute_usd_per_hour, disk_gb)
     hours = wall_hours + STARTUP_HOURS
     est = math.ceil(per_hour * hours * 100) / 100
-    return Quote(compute_usd_per_hour, per_hour, hours, est, balance, month_spent, run_cap, month_cap)
+    return Quote(compute_usd_per_hour, per_hour, hours, est, balance, month_spent, run_cap, month_cap,
+                 open_reservations)
 
 
 def refusals(q: Quote) -> list[str]:
     out = []
     if q.usd_est > q.run_cap:
         out.append(f"worst case ${q.usd_est:.2f} is over the per-run cap ${q.run_cap:.2f} (--run-cap)")
-    if q.month_spent + q.usd_est > q.month_cap:
+    if q.month_cap is not None and q.month_spent + q.usd_est > q.month_cap:
         out.append(f"month to date ${q.month_spent:.2f} + ${q.usd_est:.2f} would pass the monthly cap"
                    f" ${q.month_cap:.2f}")
-    if q.usd_est > q.balance:
-        out.append(f"worst case ${q.usd_est:.2f} is more than the account balance ${q.balance:.2f}")
+    required_balance = BALANCE_RESERVE_USD + q.open_reservations + q.usd_est
+    if q.balance < required_balance:
+        out.append(f"account balance ${q.balance:.2f} cannot cover open reservations ${q.open_reservations:.2f},"
+                   f" the new worst case ${q.usd_est:.2f} and a ${BALANCE_RESERVE_USD:.2f} reserve")
     return out
 
 

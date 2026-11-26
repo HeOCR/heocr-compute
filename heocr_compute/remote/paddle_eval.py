@@ -164,7 +164,7 @@ def launch(args):
     runner = Runner(api, ledger)
     run_id = new_run_id(runner.now())
     spec = SimpleNamespace(profile=profile, hours=minutes / 60, run_cap=args.run_cap,
-                           month_cap=budget.MONTH_CAP_USD, dry_run=not args.launch, yes=args.launch,
+                           month_cap=None, dry_run=not args.launch, yes=args.launch,
                            capacity_wait_hours=None)
     with runner.launch_slot(spec, run_id) as (quote, _):
         if quote is None:

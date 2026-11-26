@@ -1,7 +1,7 @@
 # heocr-compute
 
 HeOCR's tooling for running open-data training and engine jobs on rented machines, so a laptop stops being the bottleneck. It has one tool, `heocr-remote`, which runs one job on a [RunPod](https://www.runpod.io) pod and keeps it inside a budget:
-- the monthly cap is $150, set by the project and lowerable by flag, never raisable;
+- the live account balance must cover open reservations, the new run's worst case, and a $20 reserve;
 - the per-run cap is $25 by default.
 
 Every pod is terminated at the end, whether the job succeeded or failed.
@@ -55,10 +55,10 @@ On the pod, the inputs are in `/heocr/in`. The job runs in `/heocr`, under `time
 
 1. **Sweep.** Terminate orphaned heocr pods (below).
 2. **Inputs.** Hash every manifest file again; a file that changed since the manifest stops the run. Check every file against the open roots and the local denylist (below).
-3. **Money,** under the ledger's lock, so two runs can't both pass:
+3. **Money.** The ledger lock serializes admission and accounts for each newly booked run.
    - read the live price and the account balance;
    - compute the worst case: price × (wall-time limit + 15 min of start-up), plus disk;
-   - refuse when the worst case is over the per-run cap (`--run-cap`), would push the month over the monthly cap (`--month-cap`, at most 150), or is more than the balance;
+   - refuse when the worst case exceeds the per-run cap (`--run-cap`) or the available balance after all open reservations and a $20 reserve. Apply an additional monthly cap if the operator supplies `--month-cap`;
    - reserve the worst case in the ledger.
 4. **Pod.** Create it, then:
    - terminate it at once if it is billed more than 5% above the quote;
@@ -124,9 +124,9 @@ Only open training inputs go to a pod: synthetic lists, htext and public-domain 
 
 Hours are measured from pod creation to confirmed termination, and dollars are rounded up to the started minute.
 
-Month to date (UTC months) counts every final, plus the worst case of every reservation without one. So a runner that died mid-run can only overstate the month, never understate it. `heocr-remote spend` prints it against the $150 cap, run by run.
+Month to date (UTC months) counts every final, plus the worst case of every reservation without one. So a runner that died mid-run can only overstate the month, never understate it. `heocr-remote spend` prints the totals run by run. Each launch quote shows month-to-date spend, the new run's worst case and the live balance.
 
-**The ledger counts only this runner's spend.** The monthly cap applies to runs started with `heocr-remote`. If the RunPod account is shared with other projects, their pods are not in the ledger and do not count towards the cap. On a shared account, the balance check before each run is the only guard: a run is refused when its worst case is more than the balance left. Keep the balance at what HeOCR may spend, or give HeOCR its own account.
+**The ledger counts this runner's spend.** Account-balance admission counts open reservations across month boundaries. It retains the full worst case for each unsettled run until billing is reconciled. Pending costs from other projects are outside the ledger, so use a dedicated account for a project-wide budget.
 
 ## The sweeper
 
