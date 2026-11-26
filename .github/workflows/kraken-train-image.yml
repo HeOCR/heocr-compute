@@ -5,10 +5,10 @@ on:
     paths:
       - '.github/workflows/kraken-train-image.yml'
       - 'comparators/requirements-kraken-linux-amd64.txt'
+      - 'comparators/requirements-kraken-cuda-linux-amd64.txt'
       - 'docker/build-kraken-train-image.sh'
       - 'docker/comparators/**'
       - 'docker/hf-train-entrypoint.sh'
-      - 'experiments/tableformer/requirements-train-linux.txt'
       - 'heocr_compute/**'
       - 'pyproject.toml'
   workflow_dispatch:
@@ -30,6 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         target: [kraken-train, kraken-train-cuda]
     steps:

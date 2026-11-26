@@ -85,18 +85,17 @@ ENV HEOCR_HF_REQUIRE_REPO_SCOPE=1
 ENTRYPOINT ["/bin/sh", "/opt/heocr-hf-entrypoint.sh"]
 
 FROM pod-runtime AS kraken-train-cuda
-LABEL org.opencontainers.image.description="Autonomous Kraken training worker with CUDA 13.2."
+LABEL org.opencontainers.image.description="Autonomous Kraken training worker with CUDA 13.0."
 ENV HEOCR_HF_REQUIRE_REPO_SCOPE=1 \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 COPY comparators/requirements-kraken-linux-amd64.txt ./
-COPY experiments/tableformer/requirements-train-linux.txt ./requirements-cuda-stack.txt
+COPY comparators/requirements-kraken-cuda-linux-amd64.txt ./
 RUN sed -E '/^(torch|torchvision)==/d' requirements-kraken-linux-amd64.txt > /tmp/kraken.txt \
-    && awk '/^[^[:space:]]/ { keep = /^(cuda-|nvidia-|torch==|torchvision==|triton==)/ } keep' \
-         requirements-cuda-stack.txt > /tmp/cuda.txt \
-    && python -m pip install --only-binary=:all: --no-deps --require-hashes -r /tmp/cuda.txt \
+    && python -m pip install --only-binary=:all: --no-deps --require-hashes \
+         -r requirements-kraken-cuda-linux-amd64.txt \
     && python -m pip install --only-binary=:all: --no-deps -r /tmp/kraken.txt \
     && python -m pip check \
-    && rm /tmp/kraken.txt /tmp/cuda.txt
+    && rm /tmp/kraken.txt
 ENTRYPOINT ["/bin/sh", "/opt/heocr-hf-entrypoint.sh"]
 
 FROM adapter AS trocr

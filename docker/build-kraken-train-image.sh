@@ -6,7 +6,7 @@ image="${1:?supply a local image tag}"
 target="${2:-kraken-train}"
 case "$target" in
   kraken-train) cuda="" ;;
-  kraken-train-cuda) cuda="13.2" ;;
+  kraken-train-cuda) cuda="13.0" ;;
   *) echo "Unknown Kraken training target: $target" >&2; exit 2 ;;
 esac
 revision="$(git rev-parse HEAD)"
@@ -16,7 +16,7 @@ git archive "$revision" pyproject.toml heocr_compute docker/hf-train-entrypoint.
   docker/comparators/Dockerfile docker/comparators/NOTICE \
   docker/comparators/licenses/Intel-Simplified-Software-License.pdf \
   comparators/requirements-kraken-linux-amd64.txt \
-  experiments/tableformer/requirements-train-linux.txt | tar -x -C "$context"
+  comparators/requirements-kraken-cuda-linux-amd64.txt | tar -x -C "$context"
 docker buildx build --platform linux/amd64 --file "$context/docker/comparators/Dockerfile" \
   --target "$target" --load --provenance=false --sbom=false --tag "$image" \
   --label org.opencontainers.image.source=https://github.com/HeOCR/heocr-compute \

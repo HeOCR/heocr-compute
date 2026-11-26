@@ -170,4 +170,4 @@ Pin the published digest in the job specification. Use `--profile cpu` and pass 
 
 ### Kraken CUDA worker
 
-Select `kraken-train-cuda` in the same workflow to publish a Linux AMD64 worker with CUDA 13.2 and the pinned Torch runtime shared with the TableFormer worker. Use the published digest with the GPU profile and the same private repository scope. CI checks the CUDA build and runs the invented-line smoke on CPU. On the intended pod, verify that `torch.cuda.is_available()` is true and that the same invented-line smoke completes with `ketos --device cuda:0` before staging a real fit.
+Select `kraken-train-cuda` in the same workflow to publish a Linux AMD64 worker with CUDA 13.0 and a hash-pinned Torch 2.14 runtime. Use the published digest with the GPU profile and the same private repository scope. CI checks the CUDA build and runs the invented-line smoke on CPU. On the intended pod, verify that `torch.cuda.is_available()` is true and that the same invented-line smoke completes with `ketos --device cuda:0` before staging a real fit.
