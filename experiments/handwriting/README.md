@@ -89,6 +89,12 @@ permissions. The cloud entrypoint requires `runpod_allowed: true` and
 `partner: false` for all sources. Follow the [autonomous training contract](../../docs/autonomous-hf-training.md)
 and its dry run with a per-run cap of $3.
 
+Other recognizers can use the same entrypoint. Supply the exact starter
+digest with `--starter-sha256` and use `--starter-name starter.mlmodel`
+for a legacy VGSL starter. Kraken detects the architecture from the weights.
+When the job pins the CUDA worker, pass `--device cuda:0`. The entrypoint
+fails if CUDA is unavailable.
+
 ## Registered DEV one-shot
 
 Run locally after eval signs actual use. Give the runner the actual-use

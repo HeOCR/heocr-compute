@@ -167,3 +167,7 @@ GitHub gives the first package version private visibility. After the first push,
 The [Kraken training image workflow](../.github/workflows/kraken-train-image.yml) builds the Linux AMD64 image and runs an offline one-epoch smoke on invented lines. After review, dispatch the workflow on `main` to publish the checked image and obtain its digest. The worker uses the same pinned Kraken 7.2 and CPU PyTorch dependencies as the Linux comparator, with the autonomous supervisor as its entrypoint.
 
 Pin the published digest in the job specification. Use `--profile cpu` and pass `--hf-repo-scope` with the single private dataset approved for the job. All input pins and the snapshot destination must be in that dataset. Use a managed Hub token scoped to read and write that exact dataset. The launcher checks the scope before reserving budget, and the worker checks it again before any Hub access. For a private image, pass the approved Runpod registry credential ID as described above.
+
+### Kraken CUDA worker
+
+Select `kraken-train-cuda` in the same workflow to publish a Linux AMD64 worker with CUDA 13.0 and a hash-pinned Torch 2.14 runtime. Use the published digest with the GPU profile and the same private repository scope. CI checks the CUDA build and runs the invented-line smoke on CPU. On the intended pod, verify that `torch.cuda.is_available()` is true and that the same invented-line smoke completes with `ketos --device cuda:0` before staging a real fit.

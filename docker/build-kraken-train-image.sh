@@ -3,15 +3,22 @@
 set -euo pipefail
 
 image="${1:?supply a local image tag}"
+target="${2:-kraken-train}"
+case "$target" in
+  kraken-train) cuda="" ;;
+  kraken-train-cuda) cuda="13.0" ;;
+  *) echo "Unknown Kraken training target: $target" >&2; exit 2 ;;
+esac
 revision="$(git rev-parse HEAD)"
 context="$(mktemp -d)"
 trap 'rm -rf -- "$context"' EXIT
 git archive "$revision" pyproject.toml heocr_compute docker/hf-train-entrypoint.sh \
   docker/comparators/Dockerfile docker/comparators/NOTICE \
   docker/comparators/licenses/Intel-Simplified-Software-License.pdf \
-  comparators/requirements-kraken-linux-amd64.txt | tar -x -C "$context"
+  comparators/requirements-kraken-linux-amd64.txt \
+  comparators/requirements-kraken-cuda-linux-amd64.txt | tar -x -C "$context"
 docker buildx build --platform linux/amd64 --file "$context/docker/comparators/Dockerfile" \
-  --target kraken-train --load --provenance=false --sbom=false --tag "$image" \
+  --target "$target" --load --provenance=false --sbom=false --tag "$image" \
   --label org.opencontainers.image.source=https://github.com/HeOCR/heocr-compute \
   --label "org.opencontainers.image.revision=$revision" "$context"
 test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = linux/amd64
@@ -19,18 +26,21 @@ test "$(docker image inspect --format '{{json .Config.Entrypoint}}' "$image")" =
 docker run --rm --network none --entrypoint /opt/heocr-venv/bin/python "$image" \
   -c 'import heocr_compute.remote.hf_train_pod, huggingface_hub'
 
-docker run --rm -i --network none --entrypoint /bin/bash "$image" -s <<'BASH'
+docker run --rm -i --network none --env "EXPECTED_CUDA=$cuda" --entrypoint /bin/bash "$image" -s <<'BASH'
 set -euo pipefail
 cd "$(mktemp -d)"
 test "$HEOCR_HF_REQUIRE_REPO_SCOPE" = 1
 python - <<'PY'
 from importlib.metadata import version
+import os
 from pathlib import Path
 
 import torch
+import torchvision
 from PIL import Image, ImageDraw, ImageFont
 
-assert version("kraken") == "7.2" and torch.version.cuda is None
+assert version("kraken") == "7.2" and torch.version.cuda == (os.environ["EXPECTED_CUDA"] or None)
+assert torchvision.extension._has_ops()
 font = ImageFont.load_default(size=24)
 for split, labels in (("train", ["AB 12", "BA 21"]), ("dev", ["A1 B2"])):
     files = []
