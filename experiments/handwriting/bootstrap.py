@@ -154,7 +154,8 @@ def stage(args):
     manifest = {"schema": "heocr.handwriting_train.v1", "split": "train", "archive_sha256": digest(archive_path),
                 "sources": [{"id": args.source_id, "clean_sha256": args.clean_sha256,
                              "runpod_allowed": False, "partner": False}], "rows": rows}
-    combine(archive_path, manifest, args.local_train_batch)
+    batches = [(filename, expected, None) for filename, expected in args.local_train_batch]
+    combine(archive_path, manifest, batches)
     manifest_path = args.output / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps({"counts": {f"{role}/{slug}": count for (role, slug), count in sorted(counts.items())},

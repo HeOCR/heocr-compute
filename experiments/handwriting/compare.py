@@ -180,12 +180,16 @@ def actual_use(args):
 
 
 def write_json(path, result):
-    with path.open("x", encoding="utf-8") as stream:
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, encoding="utf-8") as stream:
         json.dump(result, stream, indent=2, sort_keys=True)
         stream.write("\n")
+        stream.flush()
+        os.link(stream.name, path)
 
 
 def score(args):
+    if args.output.exists():
+        raise FileExistsError("registered receipt already exists")
     permit = actual_use(args)
     manifest = json.loads(check(args.manifest, args.manifest_sha256).read_bytes())
     admitted = admitted_rows(manifest)
@@ -203,11 +207,7 @@ def score(args):
     tess = check(args.tesseract, args.tesseract_sha256)
     check(args.tessdata / "heb.traineddata", STOCK_SHA256)
     translations = str.maketrans(json.loads(check(args.fold, FOLD_SHA256).read_bytes())["folds"])
-    claim = args.output.with_name(args.output.name + ".started")
-    if args.output.exists() or claim.exists():
-        raise FileExistsError("receipt or registered-run claim already exists")
     cases = read_cases(args.manifest.parent.resolve(), admitted, translations)
-    write_json(claim, result)
     rows = read_both(cases, candidate, tess, args.tessdata, translations)
     return result | summarize(rows) | {
         "attempted": True, "line_fold_v1_sha256": FOLD_SHA256, "stock_sha256": STOCK_SHA256,

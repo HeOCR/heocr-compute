@@ -47,6 +47,31 @@ across batches. Staging checks both signed files and every member, joins the
 batches in command-line order and refuses a writer or image across both roles.
 Only the separately supplied TRAIN batch receipts enter this command.
 
+For routine intake, have the CLEAN publisher hand off a pinned local index
+and call `compose_local.py` from its batch-release step. This reuses the
+existing base TRAIN pair bundle, so adding a batch does not rerender earlier
+crops. Use a fresh output directory for each index. The new manifest binds
+both the base and index hashes, preserves row tags including
+`label_unreviewed`, and keeps Mac-only restrictions. `local-train.json` uses
+`schema: "heocr.handwriting_train_index.v1"`, `split: "train"` and `batches`
+with one `id` and `clean_sha256` per approved batch. Each batch supplies
+`<id>/clean.json`, `<id>/rows.jsonl` and `<id>/lines.tar` alongside the index.
+The receipt's `batch` must match its indexed `id`. A receipt with
+`row_tags_sha256` also binds `row-tags.jsonl`, which lists each admitted row's
+`id`, `group` and `tags`. The importer joins these tags to the same writer
+and row and retains provenance already present in the pair list. The index digest comes
+from the same trusted release handoff as the receipts.
+
+```sh
+python compose_local.py --base "$BASE_DIR" --base-sha256 "$BASE_MANIFEST_SHA" \
+  --index "$CLEAN_INDEX" --index-sha256 "$CLEAN_INDEX_SHA" --output "$STAGED_IN"
+```
+
+The composer processes only indexed CLEAN batches and publishes the new
+bundle after all batches validate. The staging step does not launch training.
+Use the Mac-local trainer for the composed bundle after binding the exact
+input manifest and archive to the intended run.
+
 ## Common staging format and cloud lane
 
 The data handoff uses `heocr.handwriting_train.v1` with `split: "train"` and
@@ -101,6 +126,6 @@ uses 10,000 writer-cluster draws with seed 20261125, nearest-rank 95% bounds
 and percentage points. The upper bound must be below zero and candidate
 empty share must not exceed stock empty share. The receipt has pooled and
 layout metrics, with layout scores withheld when there is only one writer.
-It contains no writer or line rows. Use the registered output path for the
-one shot. An exclusive `.started` claim persists if a reader fails so eval
-can resolve the failure without an automatic replay.
+It contains no writer or line rows. If an authorized attempt is interrupted
+or fails before publishing a receipt, rerun the same pinned comparison. The
+runner publishes the receipt atomically and preserves a completed result.
