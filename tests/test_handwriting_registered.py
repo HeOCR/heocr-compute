@@ -117,7 +117,7 @@ class RegisteredHandwritingTest(unittest.TestCase):
         self.assertEqual(compare.paired(rows), [-100, 100])
         self.assertEqual(compare.paired(list(reversed(rows))), [-100, 100])
 
-    def test_claim_blocks_retry_after_reader_failure(self):
+    def test_reader_failure_allows_retry_and_completed_receipt_is_preserved(self):
         self.stage(4, 29)
         self.args.candidate = self.root / "candidate"
         self.args.tesseract = self.root / "tesseract"
@@ -128,12 +128,18 @@ class RegisteredHandwritingTest(unittest.TestCase):
         with (patch.object(compare, "version", return_value="7.2"),
               patch.object(compare, "check", side_effect=lambda path, _: path),
               patch.object(compare, "read_cases", return_value=[]),
-              patch.object(compare, "read_both", side_effect=RuntimeError("failed")) as reader):
+              patch.object(compare, "read_both", side_effect=[RuntimeError("failed"), []]) as reader,
+              patch.object(compare, "summarize", return_value={"verdict": "not improved"})):
             with self.assertRaisesRegex(RuntimeError, "failed"):
                 compare.score(self.args)
+            self.assertFalse(self.args.output.exists())
+            compare.write_json(self.args.output, compare.score(self.args))
             with self.assertRaises(FileExistsError):
                 compare.score(self.args)
-            reader.assert_called_once()
+            with self.assertRaises(FileExistsError):
+                compare.write_json(self.args.output, {"verdict": "improved"})
+            self.assertEqual(json.loads(self.args.output.read_bytes())["verdict"], "not improved")
+            self.assertEqual(reader.call_count, 2)
 
     def test_local_batch_row_and_bytes_join(self):
         label, image = b"invented line\n", b"invented image"
@@ -198,9 +204,13 @@ class RegisteredHandwritingTest(unittest.TestCase):
         rows.write_text(json.dumps({"id": "c", "group": "writer", "role": "fit", "split": "train",
                                    "image_sha256": pin(b"indexed"), "label_sha256": pin(label),
                                    "tags": ["label_unreviewed"]}) + "\n", encoding="utf-8")
+        sidecar = indexed / "row-tags.jsonl"
+        signed_row = {"id": "c", "group": "writer", "tags": ["label_unreviewed", "writer_exposure"]}
+        tags_sha = put(sidecar, signed_row)
         receipt = {"schema": "heocr.handwriting_train_batch.v1", "split": "train", "batch": "approved",
                    "verdict": "TRAIN CLEAN", "runpod_allowed": False, "partner": False,
-                   "rows_sha256": compare.digest(rows), "archive_sha256": archive_sha}
+                   "rows_sha256": compare.digest(rows), "archive_sha256": archive_sha,
+                   "row_tags_sha256": tags_sha}
         clean = indexed / "clean.json"
         index = self.root / "index.json"
 
@@ -215,14 +225,19 @@ class RegisteredHandwritingTest(unittest.TestCase):
             compose_local.compose(base, base_sha, index, "f" * 64, output)
         with self.assertRaisesRegex(ValueError, "distinct, Mac-only"):
             compose_local.compose(base, base_sha, index, stage_index(receipt | {"batch": "unindexed"}), output)
+        index_sha = stage_index(receipt)
+        put(sidecar, signed_row | {"group": "other"})
+        with self.assertRaisesRegex(ValueError, "row tags SHA-256"):
+            compose_local.compose(base, base_sha, index, index_sha, output)
         self.assertFalse(output.exists())
+        put(sidecar, signed_row)
         index_sha = stage_index(receipt)
         pins = compose_local.compose(base, base_sha, index, index_sha, output)
         manifest = json.loads((output / "manifest.json").read_bytes())
         self.assertEqual(pins["indexed_batches"], 1)
         self.assertEqual(pins["train_pairs"], 3)
         self.assertEqual(manifest["local_train_index_sha256"], index_sha)
-        self.assertEqual(manifest["rows"][-1]["tags"], ["label_unreviewed"])
+        self.assertEqual(manifest["rows"][-1]["tags"], ["label_unreviewed", "writer_exposure"])
         self.assertEqual(compare.digest(base / "lines.tar"), base_archive)
         with tarfile.open(output / "lines.tar") as archive:
             self.assertEqual(archive.extractfile("lines/approved-c.gt.txt").read(), label)
