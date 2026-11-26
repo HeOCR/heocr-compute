@@ -28,21 +28,37 @@ class BudgetTest(unittest.TestCase):
         self.assertEqual(budget.refusals(q(compute_usd_per_hour=2.5, run_cap=40)), [])
 
     def test_over_month_cap(self):
-        r = budget.refusals(q(month_spent=140.0))
+        r = budget.refusals(q(month_spent=140.0, month_cap=150.0))
         self.assertTrue(any("monthly cap" in x for x in r))
         with self.assertRaises(budget.BudgetRefused):
-            budget.check(q(month_spent=140.0))
+            budget.check(q(month_spent=140.0, month_cap=150.0))
 
     def test_lower_month_cap_flag(self):
         self.assertTrue(budget.refusals(q(month_cap=10.0)))
 
-    def test_month_cap_cannot_be_raised(self):
+    def test_default_has_no_month_cap(self):
+        quote = q(month_spent=200.0)
+        self.assertEqual(budget.refusals(quote), [])
+        self.assertIn("month so far  $200.00", quote.lines()[3])
+
+    def test_invalid_month_cap_refused(self):
         with self.assertRaises(budget.BudgetRefused):
-            q(month_cap=151.0)
+            q(month_cap=float("inf"))
 
     def test_over_balance(self):
         r = budget.refusals(q(balance=5.0))
         self.assertTrue(any("balance" in x for x in r))
+
+    def test_balance_leaves_reserve_after_all_open_reservations(self):
+        estimate = q().usd_est
+        required = budget.BALANCE_RESERVE_USD + 70 + estimate
+        self.assertEqual(budget.refusals(q(balance=required, open_reservations=70)), [])
+        with self.assertRaisesRegex(budget.BudgetRefused, r"\$20\.00 reserve"):
+            budget.check(q(balance=required - 0.01, open_reservations=70))
+
+    def test_unknown_balance_refused(self):
+        with self.assertRaisesRegex(budget.BudgetRefused, "verifiable account balance"):
+            q(balance=float("nan"))
 
     def test_no_price_refused(self):
         with self.assertRaises(budget.BudgetRefused):
@@ -85,6 +101,18 @@ class LedgerTest(unittest.TestCase):
         self.t = dt.datetime(2026, 11, 1, 0, 30, tzinfo=dt.timezone.utc)
         self.assertEqual(self.led.month_to_date()["total"], 0.0)
         self.assertEqual(self.led.month_to_date("2026-10")["total"], 9.0)
+
+    def test_open_reservations_include_prior_month_and_current_account_only(self):
+        self.led.account = "example"
+        self.t = dt.datetime(2026, 10, 31, 23, 0, tzinfo=dt.timezone.utc)
+        self.led.reserve("pending", pod_type="x", usd_est=9.0)
+        self.t = dt.datetime(2026, 11, 1, 0, 30, tzinfo=dt.timezone.utc)
+        self.led.reserve("new", pod_type="x", usd_est=4.0)
+        self.led.append({"event": "reserve", "run_id": "other", "account": "other", "usd_est": 8.0})
+        self.assertEqual(self.led.month_to_date()["open_estimate"], 4.0)
+        self.assertEqual(self.led.open_reservations_usd(), 13.0)
+        self.led.final("pending", pod_type="x", hours=1, usd=7.0, status="ok")
+        self.assertEqual(self.led.open_reservations_usd(), 4.0)
 
     def test_final_fields(self):
         self.led.reserve("a", pod_type="cpu3cx2", usd_est=0.1)

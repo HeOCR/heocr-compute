@@ -2,7 +2,7 @@
 
 1. Sweep orphaned heocr pods.
 2. Check the inputs: manifest hashes, open roots and the local denylist (policy.py), upload size.
-3. Check the money: live price and balance, the per-run and monthly caps (budget.py), under the ledger's
+3. Check the money: live price, balance reserve and per-run cap (budget.py), under the ledger's
    lock; check CPU admission and reserve the worst case in the ledger.
 4. Create the pod, check its billed price against the quote, wait for SSH, arm a dead-man's switch on the
    pod (it removes itself after the wall-time limit plus a grace period, should this machine sleep or
@@ -122,7 +122,7 @@ class Spec:
     cmd: str
     hours: float
     run_cap: float = budget.RUN_CAP_USD
-    month_cap: float = budget.MONTH_CAP_USD
+    month_cap: float | None = None
     pulls: tuple = ("**",)
     pull_intermediate: bool = False
     results: Path | None = None
@@ -356,6 +356,7 @@ class Runner:
         compute = profiles.live_compute_price(self.api, spec.profile)
         return budget.quote(compute_usd_per_hour=compute, disk_gb=spec.profile.disk_gb, wall_hours=spec.hours,
                             balance=self.api.balance(), month_spent=month_spent,
+                            open_reservations=self.ledger.open_reservations_usd(),
                             run_cap=spec.run_cap, month_cap=spec.month_cap)
 
     def require_cpu_capacity(self, profile: profiles.Profile) -> None:
@@ -446,6 +447,9 @@ class Runner:
                     else:
                         if deadline is not None and self.clock() >= deadline:
                             break
+                        if deadline is not None and not new_cost:
+                            for line in quote.lines():
+                                self.out(line)
                         yield quote, deadline is not None
                         queue_end = None  # The reservation closes the wait in the ledger.
                         return

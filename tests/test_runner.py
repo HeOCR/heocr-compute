@@ -29,7 +29,7 @@ class Clock:
 
 
 class FakeAPI:
-    def __init__(self, cost=0.06, balance=5.0, status="RUNNING"):
+    def __init__(self, cost=0.06, balance=100.0, status="RUNNING"):
         self.cost, self._balance, self.status = cost, balance, status
         self.created, self.terminated, self.pods = [], [], {}
         self.terminate_works = True
@@ -317,6 +317,7 @@ class RunnerTest(unittest.TestCase):
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.api.pods.pop("pod-4")
             self.api.pods.pop("pod-2")
+            self.api._balance = 85.0
             self.clock.sleep(seconds)
 
         run.sleep = sleep
@@ -327,6 +328,9 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual([e["event"] for e in self.ledger.events()], ["queue", "reserve", "pod", "final"])
         run.confirm.assert_called_once()
         self.assertTrue(any("Waiting 300s" in call.args[0] for call in run.out.call_args_list))
+        balances = [call.args[0] for call in run.out.call_args_list if call.args[0].startswith("balance ")]
+        self.assertEqual(len(balances), 2)
+        self.assertIn("$85.00", balances[-1])
 
     def test_capacity_wait_expires_without_reserving_or_creating(self):
         self.api.pods["busy"] = {"id": "busy", "name": "busy", "status": "RUNNING", "cpu": {"vcpuCount": 64}}
@@ -435,8 +439,16 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(self.ledger.events(), [])
 
     def test_month_cap_counts_open_runs(self):
+        self.api._balance = 300.0
         self.ledger.reserve("x", pod_type="cpu3cx32", usd_est=149.99)
-        with self.assertRaises(budget.BudgetRefused):
+        with self.assertRaisesRegex(budget.BudgetRefused, "monthly cap"):
+            self.make(FakeRemote(dict(OUT))).run(self.spec(month_cap=150))
+        self.assertEqual(self.api.created, [])
+
+    def test_balance_reserve_counts_open_runs_before_creating_pod(self):
+        self.api._balance = 24.0
+        self.ledger.reserve("x", pod_type="cpu3cx2", usd_est=5.0)
+        with self.assertRaisesRegex(budget.BudgetRefused, "open reservations"):
             self.make(FakeRemote(dict(OUT))).run(self.spec())
         self.assertEqual(self.api.created, [])
 

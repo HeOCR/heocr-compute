@@ -62,7 +62,8 @@ def cmd_quote(a):
     hours = a.hours or p.default_hours
     compute = profiles.live_compute_price(api, p)
     q = budget.quote(compute_usd_per_hour=compute, disk_gb=p.disk_gb, wall_hours=hours, balance=api.balance(),
-                     month_spent=led.month_to_date()["total"], run_cap=a.run_cap, month_cap=a.month_cap)
+                     month_spent=led.month_to_date()["total"], open_reservations=led.open_reservations_usd(),
+                     run_cap=a.run_cap, month_cap=a.month_cap)
     print(f"{p.name}: {p.pod_type}")
     for line in q.lines():
         print(line)
@@ -169,7 +170,7 @@ def cmd_spend(a):
     usd = lambda x: f"${x:.2f}" if x == 0 or x >= 1 else f"${x:.4f}"
     print(f"{m['month']}, account {label}: {usd(m['spent'])} spent in {len(m['finals'])} runs"
           f" + {usd(m['open_estimate'])} reserved by {len(m['open'])} open runs"
-          f" = {usd(m['total'])} of ${budget.MONTH_CAP_USD:.2f} this month")
+          f" = {usd(m['total'])} this month")
     for r in m["finals"]:
         f = r["final"]
         print(f"  {f['date']}  {f['pod_type']:40} {f['hours']:7.3f} h  ${f['usd']:7.4f}  {f['status']}")
@@ -196,8 +197,7 @@ def main(argv=None) -> int:
     def money(p):
         p.add_argument("--hours", type=float, help="wall-time limit (default 12 h CPU, 4 h GPU)")
         p.add_argument("--run-cap", type=float, default=budget.RUN_CAP_USD, help="per-run cap in $ (default 25)")
-        p.add_argument("--month-cap", type=float, default=budget.MONTH_CAP_USD,
-                       help="monthly cap in $ (default and maximum 150)")
+        p.add_argument("--month-cap", type=float, help="optional additional monthly cap in $")
 
     def capacity_wait(p):
         p.add_argument("--wait-for-capacity", action=argparse.BooleanOptionalAction, default=True,
@@ -252,7 +252,7 @@ def main(argv=None) -> int:
     line.set_defaults(fn=cmd_render)
     line.add_argument("--hours", type=float, default=render.MAX_HOURS, help="pod wall limit, at most 4 h")
     line.add_argument("--run-cap", type=float, default=render.MAX_COST, help="run cap in USD, at most 1")
-    line.add_argument("--month-cap", type=float, default=budget.MONTH_CAP_USD)
+    line.add_argument("--month-cap", type=float, help="optional additional monthly cap in $")
     line.add_argument("--dry-run", action="store_true", help="perform preflight and quote without any remote writes")
     line.add_argument("--yes", action="store_true", help="do not prompt to create the pod")
     capacity_wait(line)
@@ -283,7 +283,7 @@ def main(argv=None) -> int:
     train.add_argument("--require-worker-receipt", action="store_true",
                        help="require a matching private startup receipt from the pinned worker image")
     train.add_argument("--run-cap", type=float, required=True)
-    train.add_argument("--month-cap", type=float, default=budget.MONTH_CAP_USD)
+    train.add_argument("--month-cap", type=float, help="optional additional monthly cap in $")
     train.add_argument("--dry-run", action="store_true")
     train.add_argument("--yes", action="store_true")
     capacity_wait(train)

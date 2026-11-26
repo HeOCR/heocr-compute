@@ -125,7 +125,7 @@ class RenderRunnerTest(unittest.TestCase):
             self.check_dry_run(Path(tmp))
 
     def check_dry_run(self, root: Path, *, show=False):
-        fixture = fixtures.FakeAPI(balance=5.0)
+        fixture = fixtures.FakeAPI(balance=25.0)
         fixture.pods["orphan"] = {"id": "orphan", "name": "heocr-cpu-orphan"}
         ledger = Ledger(root / "spend.jsonl", now=lambda: fixtures.NOW)
         policy = Policy(roots={"synthetic": [root]})

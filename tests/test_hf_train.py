@@ -39,7 +39,7 @@ class HfTrainTest(unittest.TestCase):
             "output": {"repo": "HeOCR/example-output", "type": "model"},
         }
         self.jobfile = self.root / "spec.json"
-        self.args = SimpleNamespace(job=self.jobfile, hf_secret="training_hub", hours=1, run_cap=1, month_cap=150,
+        self.args = SimpleNamespace(job=self.jobfile, hf_secret="training_hub", hours=1, run_cap=1, month_cap=None,
                                     yes=True, dry_run=False)
         self.write_job()
         self.ledger = Ledger(self.root / "spend.jsonl", account="example")
