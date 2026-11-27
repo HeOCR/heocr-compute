@@ -50,6 +50,13 @@ A v2 job can declare an approved TRAIN archive from the private `heocr-train-pri
 
 Generate an object-scoped [presigned GET](https://developers.cloudflare.com/r2/api/s3/presigned-urls/) from local credentials with a lifetime of at most 24 hours. Pass `HEOCR_R2_URLS` as an in-memory secret environment variable containing a JSON mapping from each R2 target to its URL. Keep it out of job specs, command arguments, shell traces and ledgers. Refresh a URL if it expires while a job is queued. The supervisor consumes the variable before starting the trainer. It refuses redirects and checks byte size and SHA-256 before making the archive visible to the trainer.
 
+A v2 job can also stage an approved Python trainer in that bucket. Add
+`"kind":"trainer"` to the R2 input record, use a `.py` object key, and set
+`"target":"train.py"`. The file can be at most 1 MiB, with the same exact
+size, SHA-256 and presigned GET checks as other R2 inputs. Review the trainer
+as executable code when approving its job SHA. The shell entrypoint remains
+a pinned private Hub input, and explicitly invokes the trainer if needed.
+
 ### Private R2 output fallback
 
 For a v2 job, set `output` to
