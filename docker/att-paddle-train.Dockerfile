@@ -17,5 +17,7 @@ RUN python3 -m venv /opt/heocr-att-paddle \
          PaddleOCR-b03f46425e8ff4442b268ce449e3eef758146cd4/ppocr PaddleOCR-b03f46425e8ff4442b268ce449e3eef758146cd4/configs \
          PaddleOCR-b03f46425e8ff4442b268ce449e3eef758146cd4/tools PaddleOCR-b03f46425e8ff4442b268ce449e3eef758146cd4/LICENSE \
     && rm /opt/paddleocr.tar.gz && test -s /opt/paddleocr/LICENSE \
-    && PYTHONPATH=/opt/paddleocr /opt/heocr-att-paddle/bin/python -c 'import sys, paddle; from ppocr.modeling.architectures import build_model; assert sys.version_info[:2] == (3, 12); assert paddle.__version__ == "3.2.2"; assert paddle.is_compiled_with_cuda() and paddle.version.cuda() == "12.6"'
+    && /opt/heocr-att-paddle/bin/python -c 'import sys, pathlib; from importlib.metadata import version; assert sys.version_info[:2] == (3, 12); assert version("paddlepaddle-gpu") == "3.2.2"; assert pathlib.Path("/opt/paddleocr/ppocr/modeling/architectures/__init__.py").is_file()'
+# paddle-gpu 3.x needs the driver's libcuda.so.1 at import, which only a GPU host provides. The import, CUDA device and
+# SVTRv2 build checks therefore run in the pod's start-up preflight (boot.sh) before any work.
 ENV HEOCR_ATT_PYTHON=/opt/heocr-att-paddle/bin/python HEOCR_ATT_PADDLEOCR=/opt/paddleocr
