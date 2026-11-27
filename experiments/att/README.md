@@ -7,7 +7,7 @@ Two CUDA training images for arm ATT, the attention-decoder line recognizer. The
 | `att-parseq-train-cuda` | `/opt/heocr-att-parseq` from [requirements-parseq-linux.txt](requirements-parseq-linux.txt) (torch 2.15.0, timm 1.0.31) | baudm/parseq `1902db04` (Apache-2.0) at `/opt/parseq` | 13.2 (driver ≥ 580) |
 | `att-paddle-train-cuda` | `/opt/heocr-att-paddle` from [requirements-paddle-linux.txt](requirements-paddle-linux.txt) (paddlepaddle-gpu 3.2.2 cu126) | PaddleOCR v3.7.0 `b03f4642` (Apache-2.0): `ppocr`, `configs`, `tools` at `/opt/paddleocr` | 12.6 (driver ≥ 560) |
 
-Both requirement files are hash-locked for Linux x86_64 / CPython 3.12. Regenerate them from the `.in` files:
+The Paddle install also needs Paddle's cu126 wheel index (`paddlepaddle-gpu` isn't on PyPI); the hashes still pin the exact wheels. Both requirement files are hash-locked for Linux x86_64 / CPython 3.12. Regenerate them from the `.in` files:
 
 ```sh
 uv pip compile requirements-parseq.in --python-version 3.12 --python-platform x86_64-manylinux_2_28 --generate-hashes --no-header -o requirements-parseq-linux.txt

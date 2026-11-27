@@ -10,6 +10,7 @@ ADD --checksum=sha256:af62d37268bc342e45d1f08dcf90fc418637cf8fb335d9db2b38f4e84c
 RUN python3 -m venv /opt/heocr-att-paddle \
     && /opt/heocr-att-paddle/bin/python -m pip install \
          --no-cache-dir --only-binary=:all: --require-hashes \
+         --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ \
          -r /opt/att-paddle-requirements.txt \
     && /opt/heocr-att-paddle/bin/python -m pip check \
     && mkdir /opt/paddleocr && tar -xzf /opt/paddleocr.tar.gz -C /opt/paddleocr --strip-components=1 \
