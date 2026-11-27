@@ -1,0 +1,8 @@
+# Arm ATT PARSeq trainer venv (Recipe B and control C). PARSeq source is vendored at baudm/parseq@1902db04 via Dockerfile ADD --checksum.
+torch==2.15.0
+torchvision==0.29.2
+timm==1.0.31
+pyyaml==6.0.3
+pillow==13.0.0
+numpy==2.5.4
+pyarrow==26.0.1
