@@ -130,6 +130,13 @@ def train(job, root, hub, receipt, *, publish_startup=False, r2_publisher=None):
 
             if "telemetry" in job:
                 fetch_inputs(job, inp, hub, progress)
+                if "tesseract_writer_parent" in job:
+                    # The source-build bootstrap installs Tesseract and lstm.train here.
+                    # Its native writer uses the default language to initialize the API.
+                    tessdata = root / "work/tess/share/tessdata"
+                    tessdata.mkdir(parents=True, exist_ok=True)
+                    (tessdata / "eng.traineddata").symlink_to(inp / job["tesseract_writer_parent"])
+                    progress("Pinned the Tesseract native writer initialization model.")
                 progress("Starting training entrypoint.")
             child = subprocess.Popen(["/bin/bash", str(inp / job["entrypoint"]), *job["args"]],
                                      cwd=root, env=env, stdin=subprocess.DEVNULL,
