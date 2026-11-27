@@ -1,0 +1,16 @@
+# Arm ATT Recipe A trainer venv: PaddleOCR v3.7.0 (source via Dockerfile ADD --checksum) on paddlepaddle-gpu 3.2.2 cu126.
+paddlepaddle-gpu==3.2.2
+shapely==2.2.0
+scikit-image==0.26.0
+pyclipper==1.4.0
+lmdb==3.0.0
+tqdm==4.70.1
+rapidfuzz==3.14.6
+cython==3.3.1
+pillow==13.0.0
+pyyaml==6.0.3
+requests==2.34.2
+albumentations==2.0.8
+packaging==26.3
+pyarrow==26.0.1
+opencv-python-headless==4.14.0.94
