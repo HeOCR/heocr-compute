@@ -89,6 +89,17 @@ retain the selected checkpoints, final artifacts and their manifest. Prune
 only the other exact run-owned object keys after the selection is recorded.
 [Cloudflare R2 conditional writes](https://developers.cloudflare.com/r2/api/s3/conditional-operations/)
 
+## Tesseract native writer
+
+For a v2 job whose bootstrap installs Tesseract into `/heocr/work/tess`, set
+`"tesseract_writer_parent":"parent.traineddata"` to use that already pinned Hub
+input to initialize `tesseract … lstm.train`. The worker creates the
+`eng.traineddata` alias before the bootstrap installs the writer and its configs.
+Source builds install the configs but do not install a default language model.
+The alias supplies the writer's initialization without changing the boxes,
+labels, or the model the trainer explicitly loads. Use a worker image built with
+this option and replay a sample with the same initialization before launch.
+
 ## Worker and launch
 
 Build the Linux AMD64 image with the repository Dockerfile. It defaults to a pinned Runpod base and installs the checksum-pinned official `runpodctl` binary. An approved replacement base can be passed by digest. The service supplies the pod-scoped credentials at startup. Use the resulting deployed digest in the job specification. For a trainer with additional dependencies, bake those into the reviewed worker before pinning it.

@@ -103,7 +103,8 @@ def parse(raw, approved):
             "expected an autonomous training job schema")
     telemetry_enabled = job["schema"] == TELEMETRY_SCHEMA
     fields(job, "schema clean_sha256 image inputs entrypoint args snapshots output"
-           + (" telemetry" if telemetry_enabled else ""))
+           + (" telemetry" if telemetry_enabled else "")
+           + (" tesseract_writer_parent" if telemetry_enabled and "tesseract_writer_parent" in job else ""))
     require(matches(SHA, job["clean_sha256"]),
             "expected the training schema and exact CLEAN receipt SHA-256")
     if telemetry_enabled:
@@ -150,6 +151,10 @@ def parse(raw, approved):
         targets.add(target)
     entrypoint = safe_path(job["entrypoint"])
     require(entrypoint.endswith(".sh") and entrypoint in hub_targets, "entrypoint must be a pinned Hub shell input")
+    if "tesseract_writer_parent" in job:
+        parent = safe_path(job["tesseract_writer_parent"])
+        require(parent.endswith(".traineddata") and parent in hub_targets,
+                "Tesseract native writer requires a pinned Hub traineddata input")
     require(isinstance(job["args"], list) and all(isinstance(a, str) and a.isprintable()
                                                 for a in job["args"]), "invalid entrypoint arguments")
     require(isinstance(job["snapshots"], list) and job["snapshots"], "declare at least one snapshot")

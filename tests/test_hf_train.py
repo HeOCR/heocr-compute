@@ -65,6 +65,40 @@ class HfTrainTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "full revision"):
             hf_job.parse(self.jobfile.read_bytes(), self.args.approved_sha256)
 
+    def test_native_writer_uses_verified_parent_before_bootstrap(self):
+        self.job["schema"] = hf_job.TELEMETRY_SCHEMA
+        self.job["telemetry"] = dict.fromkeys(
+            ("metrics_max_bytes", "trainer_log_max_bytes", "run_log_max_bytes", "setup_log_max_bytes"), 1024
+        )
+        self.job["tesseract_writer_parent"] = "parent.traineddata"
+        self.write_job()
+        with self.assertRaisesRegex(ValueError, "pinned Hub traineddata"):
+            hf_job.parse(self.jobfile.read_bytes(), self.args.approved_sha256)
+
+        parent = self.root / "parent"
+        parent.write_bytes(b"fake pinned writer initialization data")
+        self.source.write_text(
+            "set -eu\ncmp in/parent.traineddata work/tess/share/tessdata/eng.traineddata\n"
+            "printf invented > out/model.traineddata\n"
+            "printf '{}' > out/model.training-metrics.json\nprintf log > out/model.trainer.log\n"
+        )
+        shell = self.job["inputs"][0]
+        shell.update(size=self.source.stat().st_size, sha256=hf_job.digest(self.source.read_bytes()))
+        self.job["inputs"].append({
+            **shell, "path": "models/parent.traineddata", "target": "parent.traineddata",
+            "size": parent.stat().st_size, "sha256": hf_job.digest(parent.read_bytes()),
+        })
+        self.write_job()
+        job = hf_job.parse(self.jobfile.read_bytes(), self.args.approved_sha256)
+        work = self.root / "pod"
+        work.mkdir()
+        hub = Mock()
+        hub.download.side_effect = [self.source, parent]
+        receipt = {"run_id": "20990101-000000-abcd", "status": "running", "snapshots": []}
+        self.assertEqual(hf_train_pod.train(job, work, hub, receipt), "ok")
+        self.assertEqual((work / "work/tess/share/tessdata/eng.traineddata").resolve(),
+                         (work / "in/parent.traineddata").resolve())
+
     def test_only_spec_and_secret_reference_at_launch(self):
         with patch.object(Policy, "load", return_value=Policy()), contextlib.redirect_stdout(io.StringIO()) as stdout:
             self.assertEqual(hf_train.launch(self.args, profiles.PROFILES["smoke"], self.api, self.ledger), 0)
