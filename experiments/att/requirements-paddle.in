@@ -13,4 +13,6 @@ requests==2.34.2
 albumentations==2.0.8
 packaging==26.3
 pyarrow==26.0.1
+# paddle.utils.cpp_extension imports setuptools at 'import paddle' on GPU hosts (P0 run 20261127-202047-8f98).
+setuptools==84.2.1
 opencv-python-headless==4.14.0.94
