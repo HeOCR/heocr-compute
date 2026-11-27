@@ -150,6 +150,23 @@ class HfTrainTest(unittest.TestCase):
         for surface in (stdout.getvalue(), self.ledger.path.read_text(), self.jobfile.read_text()):
             self.assertNotIn("X-Amz-Signature", surface)
 
+    def test_r2_trainer_requires_explicit_kind_and_bounded_exact_target(self):
+        pin, _ = self.r2_fixture()
+        pin.update(path="training/approved.py", target="train.py", kind="trainer")
+        self.write_job()
+        parsed = hf_job.parse(self.jobfile.read_bytes(), self.args.approved_sha256)
+        self.assertEqual(parsed["inputs"][-1], pin)
+        for change in ({"target": "other.py"}, {"path": "training/approved.tar"}, {"size": (1 << 20) + 1}):
+            with self.subTest(change=change):
+                self.job["inputs"][-1] = pin | change
+                self.write_job()
+                with self.assertRaisesRegex(ValueError, "an R2 trainer"):
+                    hf_job.parse(self.jobfile.read_bytes(), self.args.approved_sha256)
+        self.job["inputs"][-1] = {key: value for key, value in pin.items() if key != "kind"}
+        self.write_job()
+        with self.assertRaisesRegex(ValueError, "TRAIN archives"):
+            hf_job.parse(self.jobfile.read_bytes(), self.args.approved_sha256)
+
     def set_r2_output(self):
         self.job["output"] = {"transport": "r2", "account": "1" * 32}
         self.job["schema"] = hf_job.TELEMETRY_SCHEMA

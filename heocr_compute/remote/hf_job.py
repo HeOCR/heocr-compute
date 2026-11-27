@@ -127,10 +127,11 @@ def parse(raw, approved):
     for item in job["inputs"]:
         is_r2 = isinstance(item, dict) and item.get("transport") == "r2"
         is_public = isinstance(item, dict) and item.get("transport") == PUBLIC_TRAIN
+        r2_recipe = is_r2 and item.get("kind") == "trainer"
         if is_r2:
-            fields(item, "transport account path target size sha256")
+            fields(item, "transport account path target size sha256" + (" kind" if r2_recipe else ""))
             require(telemetry_enabled and matches(R2_ACCOUNT, item["account"]),
-                    "R2 archives require a v2 job and an exact account")
+                    "R2 inputs require a v2 job and an exact account")
         else:
             fields(item, "repo type revision path target size sha256"
                    + (" transport release_sha256" if is_public else ""))
@@ -142,7 +143,10 @@ def parse(raw, approved):
         safe_path(item["path"])
         target = safe_path(item["target"])
         require(matches(SHA, item["sha256"]) and size_ok(item["size"]), "input requires byte size and SHA-256")
-        if is_r2 or is_public:
+        if r2_recipe:
+            require(item["path"].endswith(".py") and target == "train.py" and item["size"] <= 1024 * 1024,
+                    "an R2 trainer must be a pinned Python file of at most 1 MiB at train.py")
+        elif is_r2 or is_public:
             require(item["path"].endswith(".tar") and target.endswith(".tar"), "external inputs must be TRAIN archives")
         else:
             hub_targets.add(target)
