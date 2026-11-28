@@ -509,6 +509,56 @@ class HfTrainTest(unittest.TestCase):
             self.assertEqual(sweep(self.api, self.ledger, now=lambda: now, out=lambda _: None), ["pod-example"])
         self.api.terminate.assert_called_once_with("pod-example")
 
+    def _started_autonomous_run(self, now, run_id="20990101-004000-abcd"):
+        self.ledger.now = lambda: now
+        self.ledger.reserve(run_id, autonomous=True, usd_est=0.5, pod_type="smoke", worker_receipt_required=True,
+                            output={"transport": "r2", "account": "a" * 32},
+                            deadman_utc="2099-01-01T05:00:00+00:00", startup_deadline_utc="2099-01-01T00:55:00+00:00")
+        self.ledger.pod(run_id, pod_id="pod-example", created_utc="2099-01-01T00:40:00+00:00")
+        self.ledger.append({"event": "startup", "run_id": run_id, "pod_id": "pod-example", "status": "running"})
+        self.api.list_pods.return_value = [{"id": "pod-example", "name": "heocr-hf-" + run_id}]
+        self.api.get_pod.return_value = None
+        return run_id
+
+    def test_sweep_terminates_finished_pod_after_terminal_receipt_grace(self):
+        now = dt.datetime(2099, 1, 1, 2, tzinfo=dt.timezone.utc)
+        run_id = self._started_autonomous_run(now)
+        for age in (None, hf_train.TERMINAL_GRACE_SECONDS - 1):
+            with patch.object(hf_train, "terminal_receipt_age", return_value=age):
+                self.assertEqual(sweep(self.api, self.ledger, now=lambda: now, out=lambda _: None), [])
+        with patch.object(hf_train, "terminal_receipt_age", side_effect=ValueError):
+            self.assertEqual(sweep(self.api, self.ledger, now=lambda: now, out=lambda _: None), [])
+        self.api.terminate.assert_not_called()
+        with patch.object(hf_train, "terminal_receipt_age", return_value=hf_train.TERMINAL_GRACE_SECONDS + 1):
+            self.assertEqual(sweep(self.api, self.ledger, dry_run=True, now=lambda: now, out=lambda _: None), [])
+            self.api.terminate.assert_not_called()
+            self.assertEqual(sweep(self.api, self.ledger, now=lambda: now, out=lambda _: None), ["pod-example"])
+        self.api.terminate.assert_called_once_with("pod-example")
+        self.assertNotIn("final", self.ledger.runs()[run_id])  # collect-hf settles provider billing
+
+    def test_terminal_receipt_age_reads_only_the_terminal_r2_receipt(self):
+        now = dt.datetime(2099, 1, 1, 2, tzinfo=dt.timezone.utc)
+        reserve = {"output": {"transport": "r2", "account": "a" * 32}}
+        fetched = []
+
+        class FakeR2:
+            def __init__(self, receipt): self.receipt = receipt
+            def fetch(self, run_id, name, destination, limit, *, missing_ok=False):
+                fetched.append(name)
+                if self.receipt is None:
+                    return None
+                destination.write_text(json.dumps(self.receipt))
+                return destination
+
+        with patch.object(hf_train, "validate_receipt"):
+            self.assertIsNone(hf_train.terminal_receipt_age(None, "r", "p", reserve, lambda: now, r2=FakeR2(None)))
+            self.assertIsNone(hf_train.terminal_receipt_age(
+                None, "r", "p", reserve, lambda: now, r2=FakeR2({"status": "running", "finished_utc": None})))
+            age = hf_train.terminal_receipt_age(None, "r", "p", reserve, lambda: now, r2=FakeR2(
+                {"status": "ok", "finished_utc": "2099-01-01T01:40:00+00:00"}))
+        self.assertEqual(age, 1200)
+        self.assertEqual(set(fetched), {r2_output.TERMINAL})
+
     def test_hub_publish_failure_exposes_http_status_without_response_body(self):
         hub = object.__new__(hf_job.Hub)
         hub.api = Mock()
