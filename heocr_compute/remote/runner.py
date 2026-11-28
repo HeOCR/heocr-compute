@@ -267,6 +267,7 @@ def sweep(api, ledger: Ledger, *, everything: bool = False, dry_run: bool = Fals
         deadline = _parse_ts(res.get("deadman_utc"))
         startup_deadline = _parse_ts(res.get("startup_deadline_utc"))
         startup_timeout = False
+        terminal_done = False
         if everything:
             why = "--all"
         elif r is None:
@@ -278,6 +279,24 @@ def sweep(api, ledger: Ledger, *, everything: bool = False, dry_run: bool = Fals
             why = "its run already finished"
         elif deadline and now() > deadline:
             why = "past its deadline"
+        elif (res.get("autonomous") and not res.get("r2_archive") and res.get("output")
+              and res.get("account") == ledger.account and "startup" in r
+              and (r.get("pod") or {}).get("pod_id") == pod["id"]):
+            # A finished autonomous pod whose self-deletion failed keeps billing until its deadman.
+            from .api import load_hf_token
+            from .hf_job import is_r2_output
+            from .hf_train import TERMINAL_GRACE_SECONDS, terminal_receipt_age
+
+            try:
+                token = None if is_r2_output(res) else load_hf_token()
+                age = terminal_receipt_age(token, rid, pod["id"], res, now)
+            except (ImportError, OSError, RunPodError, ValueError, KeyError, TypeError):
+                out(f"sweep: terminal receipt unavailable for pod {pod['id']}; leaving it running")
+                continue
+            if age is None or age < TERMINAL_GRACE_SECONDS:
+                continue
+            why = f"its run receipt has been terminal for {int(age // 60)} min"
+            terminal_done = True
         elif (res.get("autonomous") and res.get("account") == ledger.account and startup_deadline
               and now() >= startup_deadline and "startup" not in r
               and (r.get("pod") or {}).get("pod_id") == pod["id"]):
@@ -318,6 +337,8 @@ def sweep(api, ledger: Ledger, *, everything: bool = False, dry_run: bool = Fals
         killed.append(pod["id"])
         if startup_timeout:
             record_startup(ledger, rid, pod["id"], state="startup_timeout")
+        elif terminal_done:
+            out(f"sweep: collect {rid} with collect-hf; provider billing settles its reservation")
         elif rid and r is not None and "final" not in r:
             created = _parse_ts(pod.get("createdAt")) or _parse_ts(res.get("date")) or now()
             secs = max(0.0, (now() - created).total_seconds())

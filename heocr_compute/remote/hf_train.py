@@ -57,6 +57,36 @@ def read_worker_startup(token, run_id, pod_id, reserve, *, r2=None):
         return receipt["status"]
 
 
+TERMINAL_GRACE_SECONDS = 600
+
+
+def terminal_receipt_age(token, run_id, pod_id, reserve, now, *, r2=None):
+    """Seconds since the run's validated terminal receipt finished, or None while no terminal receipt exists.
+
+    Reads only the terminal receipt (R2 receipt.json, or the Hub runs/<run>/receipt.json with a non-running status),
+    so a pod whose self-deletion failed after it published its final outputs can be swept without touching a live run.
+    """
+    if hf_job.is_r2_output(reserve):
+        r2 = r2 if r2 is not None else output_client(reserve["output"])
+        with tempfile.TemporaryDirectory(prefix="heocr-r2-terminal-") as cache:
+            path = r2.fetch(run_id, r2_output.TERMINAL, Path(cache) / "receipt.json", r2_output.RECEIPT_LIMIT, missing_ok=True)
+            if path is None:
+                return None
+            receipt = json.loads(path.read_bytes())
+    else:
+        with tempfile.TemporaryDirectory(prefix="heocr-terminal-receipt-") as cache:
+            hub = hf_job.Hub(token, Path(cache))
+            path = hub.find_receipt(reserve["output"], f"runs/{run_id}", hub.private_revision(reserve["output"]))
+            if path is None:
+                return None
+            receipt = json.loads(path.read_bytes())
+    validate_receipt(receipt, run_id, pod_id, reserve)
+    if receipt["status"] == "running" or not receipt.get("finished_utc"):
+        return None
+    finished = dt.datetime.fromisoformat(receipt["finished_utc"])
+    return max(0.0, (now() - finished).total_seconds())
+
+
 def watch_startup(runner, run_id, pod_id, deadline, token=None, r2=None):
     """Monitor provisioning from the account side until the pod starts or the wait expires."""
     required = token is not None or r2 is not None
